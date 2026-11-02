@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      1.7.0
-// @description  Solves Vocabulary.com with robust text-matching for reasoning models (DeepSeek-R1), auto-correction, and caching.
+// @version      1.8.0
+// @description  Solves Vocabulary.com with auto-removal of the "Try not to rush!" lockout screen, text-matching, auto-correction, and caching.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -71,11 +71,15 @@
     }
 
     // ==========================================
-    // 2. AUTO-REMOVE BLOCKER
+    // 2. AUTO-REMOVE "TRY NOT TO RUSH!" LOCKOUT
     // ==========================================
     function removeBlocker() {
-        const blocker = document.querySelector('.blocker');
-        if (blocker) blocker.remove();
+        // Targets both standard .blocker elements and Vocabulary.com's .lockout-background screen
+        const blockers = document.querySelectorAll('.blocker, .lockout-background, div[class*="lockout"]');
+        blockers.forEach(b => {
+            b.remove();
+            logDebug('Lockout / Blocker screen removed.');
+        });
     }
 
     // ==========================================
@@ -150,7 +154,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v1.7.0</span>
+                    <span>AI Vocab Solver v1.8.0</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
