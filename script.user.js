@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      1.8.2
-// @description  Solves Vocabulary.com with strict full-phrase matching, preventing cut-off partial choice selections.
+// @version      1.9.0
+// @description  Solves Vocabulary.com text, spelling, and picture-choice questions using multimodal AI models (Gemini / OpenRouter).
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -41,7 +41,7 @@
         provider: localStorage.getItem(STORAGE_KEYS.PROVIDER) || 'gemini',
         apiKey: localStorage.getItem(STORAGE_KEYS.API_KEY) || '',
         model: localStorage.getItem(STORAGE_KEYS.MODEL) || 'gemini-flash-lite-latest',
-        orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'deepseek/deepseek-chat',
+        orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'google/gemini-3.5-flash-lite',
         mode: localStorage.getItem(STORAGE_KEYS.MODE) || 'highlight',
         cache: JSON.parse(localStorage.getItem(STORAGE_KEYS.CACHE) || '{}')
     };
@@ -152,7 +152,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v1.8.2</span>
+                    <span>AI Vocab Solver v1.9.0</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
@@ -327,7 +327,7 @@
     }
 
     // ==========================================
-    // 4. DOM & QUESTION DETECTION
+    // 4. DOM & QUESTION DETECTION (TEXT & PICTURES)
     // ==========================================
     function isVisible(el) {
         if (!el) return false;
@@ -342,7 +342,7 @@
         const questions = Array.from(document.querySelectorAll(selectors));
         for (let i = questions.length - 1; i >= 0; i--) {
             const q = questions[i];
-            if (isVisible(q) && (q.querySelector('.choices') || q.querySelector('.spelltheword') || q.querySelector('input[type="text"]') || q.querySelectorAll('button, a[href="#"]').length >= 2)) {
+            if (isVisible(q) && (q.querySelector('.choices') || q.querySelector('.spelltheword') || q.querySelector('input[type="text"]') || q.querySelector('img') || q.querySelectorAll('button, a[href="#"]').length >= 2)) {
                 return q;
             }
         }
@@ -368,10 +368,31 @@
         }
     }
 
+    // Helper: Canvas screenshot capture for picture-choice questions
+    async function captureElementAsBase64(element) {
+        try {
+            // Load html2canvas dynamically if not present
+            if (!window.html2canvas) {
+                await new Promise((resolve, reject) => {
+                    const script = document.createElement('script');
+                    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+                    script.onload = resolve;
+                    script.onerror = reject;
+                    document.head.appendChild(script);
+                });
+            }
+            const canvas = await window.html2canvas(element, { scale: 1.0, useCORS: true, logging: false });
+            return canvas.toDataURL('image/jpeg', 0.85);
+        } catch (e) {
+            logDebug('Screenshot capture failed', e.message);
+            return null;
+        }
+    }
+
     // ==========================================
-    // 5. UNIFIED API CALL WITH R1 REASONING STRIPPER
+    // 5. UNIFIED API CALL (TEXT + MULTIMODAL IMAGES)
     // ==========================================
-    async function callAI(systemPrompt, userPrompt) {
+    async function callAI(systemPrompt, userPrompt, base64Image = null) {
         if (!config.apiKey) {
             setStatus('⚠️ Missing API Key!');
             return null;
@@ -382,9 +403,18 @@
         if (config.provider === 'gemini') {
             endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent?key=${encodeURIComponent(config.apiKey)}`;
             headers = { 'Content-Type': 'application/json' };
+
+            let contentParts = [{ text: userPrompt }];
+            if (base64Image) {
+                const base64Data = base64Image.split(',')[1];
+                contentParts.push({
+                    inlineData: { mimeType: 'image/jpeg', data: base64Data }
+                });
+            }
+
             body = JSON.stringify({
                 systemInstruction: { parts: [{ text: systemPrompt }] },
-                contents: [{ parts: [{ text: userPrompt }] }],
+                contents: [{ parts: contentParts }],
                 generationConfig: { temperature: 0.0, maxOutputTokens: 100 }
             });
         } else {
@@ -395,14 +425,20 @@
                 'HTTP-Referer': 'https://vocabulary.com',
                 'X-Title': 'Vocab AI Solver'
             };
+
+            let userContent = [{ type: 'text', text: userPrompt }];
+            if (base64Image) {
+                userContent.push({ type: 'image_url', image_url: { url: base64Image } });
+            }
+
             body = JSON.stringify({
                 model: config.orModel,
                 messages: [
                     { role: 'system', content: systemPrompt },
-                    { role: 'user', content: userPrompt }
+                    { role: 'user', content: userContent }
                 ],
                 temperature: 0.0,
-                max_tokens: 500
+                max_tokens: 300
             });
         }
 
@@ -422,31 +458,37 @@
         }
 
         if (typeof reply !== 'string') return '';
-
-        // Strip out DeepSeek-R1 <think>...</think> blocks if present
-        reply = reply.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-        return reply;
+        return reply.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
     }
 
-    async function askAIMultipleChoice(promptText, choicesTextArray) {
-        const formattedChoices = choicesTextArray.map(c => `- ${c}`).join('\n');
-        const systemInstruction = "You are a precise Vocabulary.com question solver. Analyze the question prompt and the available choices. Respond with ONLY the exact full text of the correct choice from the list. Do not summarize, do not output partial phrases, and do not include bullet points, quotes, or punctuation.";
-        const userPrompt = `Question / Prompt:\n${promptText}\n\nAvailable Choices:\n${formattedChoices}`;
+    async function askAIMultipleChoice(questBox, promptText, choicesTextArray, isPictureChoice, base64Img) {
+        let systemInstruction, userPrompt;
 
-        const rawReply = await callAI(systemInstruction, userPrompt);
+        if (isPictureChoice) {
+            systemInstruction = "You are a precise Vocabulary.com picture-choice question solver. Examine the attached image which contains 4 numbered picture choices (arranged in a grid or list) and a vocabulary word prompt. Identify which picture quadrant or option best illustrates the vocabulary word. Respond with ONLY the exact text label or image description corresponding to the correct choice, or if no text is present, describe the correct choice concisely. Do not pick the question prompt.";
+            userPrompt = `Question Prompt: ${promptText}\n\nChoose the correct picture option from the image. Respond with ONLY the matching option text.`;
+        } else {
+            systemInstruction = "You are a precise Vocabulary.com question solver. Analyze the question prompt and the available choices. Respond with ONLY the exact full text of the correct choice from the list. Do not summarize, do not output partial phrases, and do not include bullet points, quotes, or punctuation.";
+            userPrompt = `Question / Prompt:\n${promptText}\n\nAvailable Choices:\n${choicesTextArray.map(c => `- ${c}`).join('\n')}`;
+        }
+
+        const rawReply = await callAI(systemInstruction, userPrompt, base64Img);
         logDebug('AI raw reply', rawReply);
 
         if (!rawReply) return null;
-
         const cleanedReply = rawReply.replace(/^["']|["']$/g, '').trim();
 
-        // 1. Exact match
-        let matched = choicesTextArray.find(c => c.toLowerCase().trim() === cleanedReply.toLowerCase());
-
-        // 2. Strict Substring match (ensuring reply is at least 4 chars to prevent partial matches like "the")
-        if (!matched && cleanedReply.length >= 4) {
-            matched = choicesTextArray.find(c => c.toLowerCase().includes(cleanedReply.toLowerCase()));
+        // Prevent model from accidentally returning the question prompt itself
+        if (promptText.toLowerCase().includes(cleanedReply.toLowerCase())) {
+            logDebug('AI mistakenly returned question prompt. Rejecting.');
+            return null;
         }
+
+        const matched = choicesTextArray.find(c => {
+            const cleanC = c.toLowerCase().trim();
+            const cleanR = cleanedReply.toLowerCase().trim();
+            return cleanC === cleanR || cleanC.includes(cleanR) || cleanR.includes(cleanC);
+        });
 
         return matched || null;
     }
@@ -486,17 +528,32 @@
 
     async function handleMultipleChoice(questBox, choicesContainer) {
         const choiceElements = Array.from(choicesContainer.children).filter(el => el.innerText.trim().length > 0);
-        if (choiceElements.length === 0) return;
+        
+        // Check if this is a picture choice question (contains images or grid of picture options)
+        const isPictureChoice = questBox.querySelector('img') !== null && choiceElements.length === 0;
+        let pictureChoices = [];
 
-        const choicesText = choiceElements.map(getCleanChoiceText);
+        if (isPictureChoice) {
+            // For picture choices, clickable elements might be image containers or grid items
+            const imgBoxes = Array.from(questBox.querySelectorAll('.choice, div[class*="image"], div[class*="picture"], a'));
+            if (imgBoxes.length > 0) {
+                pictureChoices = imgBoxes;
+            }
+        }
+
+        const effectiveChoices = isPictureChoice ? pictureChoices : choiceElements;
+        if (effectiveChoices.length === 0) return;
+
+        const choicesText = isPictureChoice ? effectiveChoices.map((_, idx) => `Picture Option ${idx + 1}`) : effectiveChoices.map(getCleanChoiceText);
+        
         const clone = questBox.cloneNode(true);
         const cloneChoices = clone.querySelector('.choices') || clone.querySelector('ul[class*="choice"]');
         if (cloneChoices) cloneChoices.remove();
         const fullPrompt = clone.innerText.trim();
 
-        if (!fullPrompt) return;
+        if (!fullPrompt && !isPictureChoice) return;
 
-        const cacheKey = generateCacheKey(fullPrompt, choicesText);
+        const cacheKey = generateCacheKey(fullPrompt || 'picture-choice', choicesText);
 
         if (cacheKey === lastSolvedSignature) return;
         lastSolvedSignature = cacheKey;
@@ -509,7 +566,12 @@
             const activeModelName = config.provider === 'gemini' ? config.model : config.orModel;
             setStatus(`🤖 Asking ${activeModelName}...`);
             try {
-                winningAnswerText = await askAIMultipleChoice(fullPrompt, choicesText);
+                let base64Img = null;
+                if (isPictureChoice) {
+                    base64Img = await captureElementAsBase64(questBox);
+                }
+
+                winningAnswerText = await askAIMultipleChoice(questBox, fullPrompt || 'Choose the best picture', choicesText, isPictureChoice, base64Img);
                 if (winningAnswerText) {
                     saveCache(cacheKey, winningAnswerText);
                     setStatus(`✅ Answer found`);
@@ -526,7 +588,7 @@
             return;
         }
 
-        const targetElement = choiceElements.find(el => {
+        const targetElement = effectiveChoices.find(el => {
             const clean = getCleanChoiceText(el).toLowerCase();
             const target = winningAnswerText.trim().toLowerCase();
             return clean === target || clean.includes(target) || target.includes(clean);
@@ -603,11 +665,12 @@
 
         const choicesContainer = questBox.querySelector('.choices') || questBox.querySelector('ul[class*="choice"]');
         const spellInput = questBox.querySelector('.spelltheword, input[type="text"]');
+        const hasImages = questBox.querySelector('img') !== null;
 
         isProcessing = true;
         try {
-            if (choicesContainer && choicesContainer.children.length > 0) {
-                await handleMultipleChoice(questBox, choicesContainer);
+            if ((choicesContainer && choicesContainer.children.length > 0) || hasImages) {
+                await handleMultipleChoice(questBox, choicesContainer || questBox);
             } else if (spellInput) {
                 await handleSpelling(questBox);
             }
