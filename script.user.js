@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      1.5.0
-// @description  Solves Vocabulary.com (Practice, Trainer, and Vocab Jam) using Gemini or OpenRouter models with a live model search tool, auto-removes blockers, and caches answers.
+// @version      1.6.0
+// @description  Solves Vocabulary.com with bulletproof error handling, auto-correction on wrong answers, live model search, and caching.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -19,11 +19,11 @@
     // 1. STATE & STORAGE MANAGEMENT
     // ==========================================
     const STORAGE_KEYS = {
-        PROVIDER: 'vcom_ai_provider', // 'gemini' | 'openrouter'
+        PROVIDER: 'vcom_ai_provider',
         API_KEY: 'vcom_ai_api_key',
         MODEL: 'vcom_ai_model',
         OR_MODEL: 'vcom_or_custom_model',
-        MODE: 'vcom_ai_mode', // 'highlight' | 'auto'
+        MODE: 'vcom_ai_mode',
         CACHE: 'vcom_ai_cache'
     };
 
@@ -41,7 +41,7 @@
         provider: localStorage.getItem(STORAGE_KEYS.PROVIDER) || 'gemini',
         apiKey: localStorage.getItem(STORAGE_KEYS.API_KEY) || '',
         model: localStorage.getItem(STORAGE_KEYS.MODEL) || 'gemini-flash-lite-latest',
-        orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'google/gemini-flash-1.5',
+        orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'deepseek/deepseek-chat',
         mode: localStorage.getItem(STORAGE_KEYS.MODE) || 'highlight',
         cache: JSON.parse(localStorage.getItem(STORAGE_KEYS.CACHE) || '{}')
     };
@@ -59,7 +59,8 @@
     }
 
     function saveCache(hash, answerText) {
-        config.cache[hash] = answerText;
+        if (!hash || !answerText) return;
+        config.cache[hash] = answerText.trim();
         localStorage.setItem(STORAGE_KEYS.CACHE, JSON.stringify(config.cache));
         updateCacheCountUI();
     }
@@ -76,7 +77,6 @@
         const blocker = document.querySelector('.blocker');
         if (blocker) {
             blocker.remove();
-            logDebug('Blocker element removed.');
         }
     }
 
@@ -89,105 +89,44 @@
         const style = document.createElement('style');
         style.textContent = `
             #vcom-ai-toggle {
-                position: fixed;
-                bottom: 20px;
-                right: 20px;
-                z-index: 999999;
-                background: #1e293b;
-                color: #38bdf8;
-                border: 2px solid #38bdf8;
-                border-radius: 50%;
-                width: 44px;
-                height: 44px;
-                font-size: 20px;
-                cursor: pointer;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                transition: transform 0.2s;
+                position: fixed; bottom: 20px; right: 20px; z-index: 999999;
+                background: #1e293b; color: #38bdf8; border: 2px solid #38bdf8;
+                border-radius: 50%; width: 44px; height: 44px; font-size: 20px;
+                cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                display: flex; align-items: center; justify-content: center; transition: transform 0.2s;
             }
             #vcom-ai-toggle:hover { transform: scale(1.08); }
             #vcom-ai-panel {
-                position: fixed;
-                bottom: 75px;
-                right: 20px;
-                z-index: 999999;
-                width: 330px;
-                background: #0f172a;
-                color: #f8fafc;
-                border: 1px solid #334155;
-                border-radius: 12px;
-                padding: 16px;
-                font-family: system-ui, -apple-system, sans-serif;
-                font-size: 13px;
-                box-shadow: 0 10px 25px rgba(0,0,0,0.5);
-                display: none;
+                position: fixed; bottom: 75px; right: 20px; z-index: 999999;
+                width: 330px; background: #0f172a; color: #f8fafc; border: 1px solid #334155;
+                border-radius: 12px; padding: 16px; font-family: system-ui, sans-serif;
+                font-size: 13px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); display: none;
             }
             #vcom-ai-panel.open { display: block; }
             .vcom-ai-header {
-                font-weight: 700;
-                font-size: 15px;
-                margin-bottom: 12px;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                color: #38bdf8;
-                border-bottom: 1px solid #1e293b;
-                padding-bottom: 8px;
+                font-weight: 700; font-size: 15px; margin-bottom: 12px;
+                display: flex; justify-content: space-between; align-items: center;
+                color: #38bdf8; border-bottom: 1px solid #1e293b; padding-bottom: 8px;
             }
             .vcom-ai-field { margin-bottom: 10px; }
-            .vcom-ai-field label {
-                display: block;
-                margin-bottom: 4px;
-                color: #94a3b8;
-                font-weight: 500;
-            }
+            .vcom-ai-field label { display: block; margin-bottom: 4px; color: #94a3b8; font-weight: 500; }
             .vcom-ai-input, .vcom-ai-select {
-                width: 100%;
-                padding: 7px;
-                background: #1e293b;
-                border: 1px solid #475569;
-                color: #fff;
-                border-radius: 6px;
-                box-sizing: border-box;
-                font-size: 12px;
+                width: 100%; padding: 7px; background: #1e293b; border: 1px solid #475569;
+                color: #fff; border-radius: 6px; box-sizing: border-box; font-size: 12px;
             }
             .vcom-ai-row { display: flex; gap: 6px; align-items: center; }
             .vcom-ai-status {
-                margin-top: 8px;
-                padding: 6px 8px;
-                border-radius: 6px;
-                background: #1e293b;
-                color: #cbd5e1;
-                font-size: 12px;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                gap: 6px;
+                margin-top: 8px; padding: 6px 8px; border-radius: 6px; background: #1e293b;
+                color: #cbd5e1; font-size: 12px; display: flex; justify-content: space-between; align-items: center; gap: 6px;
             }
-            .vcom-ai-btn {
-                background: #ef4444;
-                color: white;
-                border: none;
-                padding: 5px 8px;
-                border-radius: 4px;
-                cursor: pointer;
-                font-size: 11px;
-            }
-            .vcom-ai-btn.secondary {
-                background: #334155;
-                color: #38bdf8;
-            }
+            .vcom-ai-btn { background: #ef4444; color: white; border: none; padding: 5px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+            .vcom-ai-btn.secondary { background: #334155; color: #38bdf8; }
             .vcom-ai-btn:hover { opacity: 0.9; }
             #vcom-model-search-modal {
-                position: fixed;
-                top: 50%; left: 50%; transform: translate(-50%, -50%);
-                z-index: 1000000;
-                width: 400px; max-height: 80vh;
-                background: #0f172a; border: 2px solid #38bdf8; border-radius: 12px;
-                padding: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);
-                display: none; flex-direction: column; color: #fff;
+                position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+                z-index: 1000000; width: 400px; max-height: 80vh; background: #0f172a;
+                border: 2px solid #38bdf8; border-radius: 12px; padding: 16px;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.8); display: none; flex-direction: column; color: #fff;
             }
             #vcom-model-search-modal.open { display: flex; }
             #vcom-model-list { overflow-y: auto; max-height: 300px; margin-top: 8px; border: 1px solid #334155; border-radius: 6px; }
@@ -213,7 +152,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v1.6</span>
+                    <span>AI Vocab Solver v1.7</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
@@ -246,7 +185,7 @@
                 <div class="vcom-ai-status">
                     <span id="vcom-cache-count">Cached: ${Object.keys(config.cache).length}</span>
                     <div>
-                        <button id="vcom-copy-debug" class="vcom-ai-btn secondary" title="Copy logs & DOM">Logs</button>
+                        <button id="vcom-copy-debug" class="vcom-ai-btn secondary">Logs</button>
                         <button id="vcom-clear-cache" class="vcom-ai-btn">Clear Cache</button>
                     </div>
                 </div>
@@ -367,7 +306,6 @@
         }
 
         renderPanelBody();
-
         toggleBtn.addEventListener('click', () => panel.classList.toggle('open'));
         document.addEventListener('keydown', (e) => {
             if (e.altKey && e.key.toLowerCase() === 'g') {
@@ -389,7 +327,7 @@
     }
 
     // ==========================================
-    // 4. DOM & QUESTION DETECTION (Supports Jam, Trainer, Practice)
+    // 4. DOM & QUESTION DETECTION
     // ==========================================
     function isVisible(el) {
         if (!el) return false;
@@ -400,7 +338,6 @@
     }
 
     function findActiveQuestionBox() {
-        // Expanded selectors to catch Jam, Trainer, and Practice layouts
         const selectors = '.question, div[class*="question"], div[class*="jam"], .challenge, .prompt';
         const questions = Array.from(document.querySelectorAll(selectors));
         for (let i = questions.length - 1; i >= 0; i--) {
@@ -432,7 +369,7 @@
     }
 
     // ==========================================
-    // 5. UNIFIED API CALL (GEMINI OR OPENROUTER)
+    // 5. UNIFIED API CALL WITH SAFE NULL HANDLING
     // ==========================================
     async function callAI(systemPrompt, userPrompt) {
         if (!config.apiKey) {
@@ -477,20 +414,24 @@
         }
 
         const data = await res.json();
+        let reply = '';
         if (config.provider === 'gemini') {
-            return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+            reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
         } else {
-            return data?.choices?.[0]?.message?.content?.trim() || '';
+            reply = data?.choices?.[0]?.message?.content || '';
         }
+        return typeof reply === 'string' ? reply.trim() : '';
     }
 
     async function askAIMultipleChoice(promptText, choicesTextArray) {
         const formattedChoices = choicesTextArray.map(c => `- ${c}`).join('\n');
-        const systemInstruction = "You are a precise Vocabulary.com question solver. Analyze the question prompt and choices. Respond with ONLY the exact text of the correct option from the list. Do not include bullet points, numbers, or quotes.";
-        const userPrompt = `Question:\n${promptText}\n\nOptions:\n${formattedChoices}`;
+        const systemInstruction = "You are an expert lexicographer and Vocabulary.com solver. Look at the word/question prompt and the available choices. Return EXACTLY and ONLY the text of the single correct choice from the list. Do not add quotes, explanations, or punctuation.";
+        const userPrompt = `Question / Word Prompt:\n${promptText}\n\nAvailable Options:\n${formattedChoices}`;
 
         const rawReply = await callAI(systemInstruction, userPrompt);
         logDebug('AI raw reply', rawReply);
+
+        if (!rawReply) return null;
 
         const matched = choicesTextArray.find(c => {
             const cleanC = c.toLowerCase().trim();
@@ -508,7 +449,7 @@
     }
 
     // ==========================================
-    // 6. QUESTION SOLVING PIPELINE
+    // 6. QUESTION SOLVING & AUTO-CORRECTION PIPELINE
     // ==========================================
     function triggerHumanDelay(callback) {
         const delay = Math.floor(Math.random() * 301) + 400;
@@ -538,10 +479,6 @@
         const choiceElements = Array.from(choicesContainer.children).filter(el => el.innerText.trim().length > 0);
         if (choiceElements.length === 0) return;
 
-        if (choiceElements.some(el => el.classList.contains('correct')) && isVisible(document.querySelector('.blasé, .review, .next.active'))) {
-            return;
-        }
-
         const choicesText = choiceElements.map(getCleanChoiceText);
         const clone = questBox.cloneNode(true);
         const cloneChoices = clone.querySelector('.choices') || clone.querySelector('ul[class*="choice"]');
@@ -551,6 +488,14 @@
         if (!fullPrompt) return;
 
         const cacheKey = generateCacheKey(fullPrompt, choicesText);
+
+        // Auto-Correction / Passive Learning: If user or auto-answer reveals the correct answer in DOM, cache it!
+        const correctEl = choiceElements.find(el => el.classList.contains('correct'));
+        if (correctEl) {
+            saveCache(cacheKey, getCleanChoiceText(correctEl));
+            return;
+        }
+
         if (cacheKey === lastSolvedSignature) return;
         lastSolvedSignature = cacheKey;
 
@@ -595,15 +540,16 @@
             }
         }
 
+        // Listen for clicks to learn if the answer was correct/incorrect
         choiceElements.forEach(el => {
             if (el.dataset.listenerAttached) return;
             el.dataset.listenerAttached = 'true';
             el.addEventListener('click', () => {
                 setTimeout(() => {
-                    for (const c of choiceElements) {
-                        if (c.classList.contains('correct')) {
-                            saveCache(cacheKey, getCleanChoiceText(c));
-                        }
+                    const actualCorrect = choiceElements.find(c => c.classList.contains('correct'));
+                    if (actualCorrect) {
+                        saveCache(cacheKey, getCleanChoiceText(actualCorrect));
+                        setStatus('🧠 Cached correct answer from result');
                     }
                 }, 400);
             });
