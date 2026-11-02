@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      1.3.0
 // @description  Solves Vocabulary.com with Gemini models, auto-removes "Try not to rush!", auto-answers spelling & multiple choice, and caches answers.
-// @author       apple-bonkers
+// @author       You
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
 // @grant        none
