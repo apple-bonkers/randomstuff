@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      2.0.0
-// @description  Solves Vocabulary.com (Text, Spelling, Picture Choices, Vocab Jam) with chain-of-thought accuracy, anti-lockout pacing, and image support.
+// @version      2.0.1
+// @description  Solves Vocabulary.com (Text, Spelling, Picture Choices, Vocab Jam) with unbreakable reply parsing, synonym extraction, and anti-lockout pacing.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -44,7 +44,7 @@
         model: localStorage.getItem(STORAGE_KEYS.MODEL) || 'gemini-flash-lite-latest',
         orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'deepseek/deepseek-chat',
         mode: localStorage.getItem(STORAGE_KEYS.MODE) || 'auto',
-        speed: localStorage.getItem(STORAGE_KEYS.SPEED) || 'safe', // 'safe' prevents 5-min rush lockouts
+        speed: localStorage.getItem(STORAGE_KEYS.SPEED) || 'safe',
         cache: JSON.parse(localStorage.getItem(STORAGE_KEYS.CACHE) || '{}')
     };
 
@@ -76,16 +76,14 @@
     // 2. BLOCKER & LOCKOUT MANAGEMENT
     // ==========================================
     function checkBlockersAndLockout() {
-        // 1. Remove legacy 5-second click blocker on practice pages
         const legacyBlockers = document.querySelectorAll('.blocker');
         legacyBlockers.forEach(b => b.remove());
 
-        // 2. Check for VocabTrainer 5-minute rush lockout
         const lockout = document.querySelector('.lockout-background, div[class*="lockout"]');
         if (lockout) {
             const timeElem = lockout.querySelector('.lockout-continue-text b, b');
             const remaining = timeElem ? timeElem.innerText.trim() : 'a few minutes';
-            setStatus(`⏸️ Cooldown Active: Pausing (${remaining}) to prevent account flag.`);
+            setStatus(`⏸️ Cooldown Active: Pausing (${remaining}) to prevent flag.`);
             return true;
         }
         return false;
@@ -163,7 +161,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v2.0.0</span>
+                    <span>AI Vocab Solver v2.0.1</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
@@ -356,7 +354,7 @@
     }
 
     // ==========================================
-    // 4. DOM & QUESTION DETECTION
+    // 4. DOM & CLEAN TEXT EXTRACTION
     // ==========================================
     function isVisible(el) {
         if (!el) return false;
@@ -384,8 +382,17 @@
         return null;
     }
 
+    // Extracts true word/phrase without DOM tool/button contamination
     function getCleanChoiceText(el) {
-        return el.innerText.replace(/ 🧠$/g, '').trim();
+        if (!el) return '';
+        const lookupSpan = el.querySelector('.lookup[word]');
+        if (lookupSpan && lookupSpan.getAttribute('word')) {
+            return lookupSpan.getAttribute('word').trim();
+        }
+        const clone = el.cloneNode(true);
+        const tools = clone.querySelector('.tools, .lookup');
+        if (tools) tools.remove();
+        return clone.innerText.replace(/ 🧠$/g, '').trim();
     }
 
     function applyReferenceHighlight(choiceElement) {
@@ -398,8 +405,18 @@
     }
 
     // ==========================================
-    // 5. BULLETPROOF API CALLS WITH TIMEOUT
+    // 5. UNBREAKABLE AI CALL ENGINE
     // ==========================================
+    function cleanAIReply(reply) {
+        if (!reply || typeof reply !== 'string') return '';
+        let stripped = reply.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+        if (!stripped) {
+            // Model outputted inside thinking tokens: unwrap rather than discarding
+            stripped = reply.replace(/<\/?think>/gi, '').trim();
+        }
+        return stripped;
+    }
+
     async function callAI(systemPrompt, userPrompt, imageUrls = []) {
         if (!config.apiKey) {
             setStatus('⚠️ Missing API Key!');
@@ -438,7 +455,7 @@
                         userContent.push({ type: 'image_url', image_url: { url } });
                     });
                 } else {
-                    userContent = userPrompt; // STRING FORMAT: Guaranteed compatibility with all OpenRouter text models
+                    userContent = userPrompt; // Text models require pure string format
                 }
 
                 body = JSON.stringify({
@@ -462,57 +479,79 @@
             }
 
             const data = await res.json();
-            let reply = '';
+            let rawContent = '';
             if (config.provider === 'gemini') {
-                reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                rawContent = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
             } else {
-                reply = data?.choices?.[0]?.message?.content || '';
+                const msg = data?.choices?.[0]?.message;
+                rawContent = msg?.content || msg?.reasoning || msg?.reasoning_content || '';
             }
 
-            if (typeof reply !== 'string') return '';
-            return reply.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+            return cleanAIReply(rawContent);
         } catch (err) {
             clearTimeout(timeoutId);
             throw err;
         }
     }
 
-    // Extracts final answer from chain-of-thought responses
     function extractFinalAnswer(rawReply) {
         if (!rawReply) return '';
-        let clean = rawReply.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-        const match = clean.match(/(?:ANSWER|CORRECT(?: ANSWER)?|CHOICE):\s*([^\n\r]+)/i);
+        const match = rawReply.match(/(?:ANSWER|CORRECT(?: ANSWER)?|CHOICE):\s*([^\n\r]+)/i);
         if (match && match[1]) {
-            clean = match[1].trim();
-        } else {
-            const lines = clean.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-            if (lines.length > 0) clean = lines[lines.length - 1];
+            return match[1].replace(/^["'*\s]+|["'*\s]+$/g, '').trim();
         }
-        return clean.replace(/^["'*\s]+|["'*\s]+$/g, '').trim();
+        const lines = rawReply.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        return lines.length > 0 ? lines[lines.length - 1].replace(/^["'*\s]+|["'*\s]+$/g, '').trim() : '';
     }
 
     async function askAIMultipleChoice(promptText, choicesTextArray) {
+        const formattedChoices = choicesTextArray.map((c, i) => `${i + 1}. ${c}`).join('\n');
         const systemInstruction = 
-            "You are an expert Vocabulary.com test solver. Analyze the sentence, question prompt, and multiple-choice options.\n" +
-            "Think step-by-step: eliminate the incorrect distractors based on exact dictionary definitions and part of speech.\n" +
-            "Then, on your final line, output your selection strictly in this format:\n" +
-            "ANSWER: <exact text of the chosen option>";
+            "You are an expert Vocabulary.com test solver. Select the single best answer choice for the vocabulary question.\n" +
+            "Output ONLY the text or number of the correct option in this exact format:\n" +
+            "ANSWER: <exact text of chosen option>";
 
-        const userPrompt = `Question Context / Prompt:\n${promptText}\n\nAvailable Options:\n${choicesTextArray.map(c => `- ${c}`).join('\n')}`;
+        const userPrompt = `Question Context / Prompt:\n${promptText}\n\nAvailable Options:\n${formattedChoices}`;
 
         const rawReply = await callAI(systemInstruction, userPrompt);
         logDebug('AI raw reply', rawReply);
 
+        if (!rawReply) return null;
+
         const parsed = extractFinalAnswer(rawReply);
         logDebug('Parsed final answer', parsed);
 
-        if (!parsed) return null;
-
         // 1. Exact match
-        let matched = choicesTextArray.find(c => c.toLowerCase().trim() === parsed.toLowerCase());
-        // 2. Substring match
+        let matched = choicesTextArray.find(c => c.toLowerCase().trim() === parsed.toLowerCase().trim());
+
+        // 2. Numbered index match (1, 2, 3, 4)
+        if (!matched) {
+            const numMatch = parsed.match(/^([1-4])\b/);
+            if (numMatch) {
+                const idx = parseInt(numMatch[1], 10) - 1;
+                if (idx >= 0 && idx < choicesTextArray.length) {
+                    matched = choicesTextArray[idx];
+                }
+            }
+        }
+
+        // 3. Substring match
         if (!matched && parsed.length >= 3) {
-            matched = choicesTextArray.find(c => c.toLowerCase().includes(parsed.toLowerCase()) || parsed.toLowerCase().includes(c.toLowerCase()));
+            matched = choicesTextArray.find(c => 
+                c.toLowerCase().includes(parsed.toLowerCase()) || 
+                parsed.toLowerCase().includes(c.toLowerCase())
+            );
+        }
+
+        // 4. Raw reply content scan (resilience for verbose reasoning outputs)
+        if (!matched) {
+            const replyLower = rawReply.toLowerCase();
+            for (const choice of choicesTextArray) {
+                if (choice.length >= 3 && replyLower.includes(choice.toLowerCase())) {
+                    matched = choice;
+                    break;
+                }
+            }
         }
 
         return matched || null;
@@ -521,15 +560,18 @@
     async function askAISpelling(sentenceContext) {
         const systemInstruction = 
             "You are an expert Vocabulary.com spelling solver.\n" +
-            "You are given a sentence with missing blanks (________).\n" +
-            "Determine the single vocabulary word that precisely fits the sentence context and meaning.\n" +
-            "On your final line, output strictly:\n" +
-            "ANSWER: <single lowercase word>";
+            "Given a sentence with missing blanks (________), determine the single vocabulary word that fits the context.\n" +
+            "Output ONLY the word in this exact format:\n" +
+            "ANSWER: <word>";
 
         const rawReply = await callAI(systemInstruction, `Sentence:\n${sentenceContext}`);
         logDebug('AI spelling reply', rawReply);
 
-        const parsed = extractFinalAnswer(rawReply);
+        let parsed = extractFinalAnswer(rawReply);
+        if (!parsed && rawReply) {
+            const words = rawReply.match(/\b[a-zA-Z-]{3,}\b/g);
+            if (words && words.length > 0) parsed = words[words.length - 1];
+        }
         return parsed ? parsed.toLowerCase().replace(/[^a-z-]/g, '') : null;
     }
 
@@ -561,8 +603,7 @@
         } else if (config.speed === 'fast') {
             return Math.floor(Math.random() * 1000) + 1500; // 1.5s - 2.5s
         } else {
-            // 'safe' - prevents 5-minute cooldown break
-            return Math.floor(Math.random() * 1500) + 3200; // 3.2s - 4.7s
+            return Math.floor(Math.random() * 1500) + 3200; // 3.2s - 4.7s (prevents 5-min lockout)
         }
     }
 
@@ -591,7 +632,6 @@
 
         if (choiceElements.length === 0) return;
 
-        // Skip if already answered and showing review/next button
         if (choiceElements.some(el => el.classList.contains('correct') || el.classList.contains('incorrect'))) {
             checkNextButton();
             return;
@@ -621,7 +661,7 @@
                 winningAnswerText = await askAIMultipleChoice(fullPrompt, choicesText);
                 if (winningAnswerText) {
                     saveCache(cacheKey, winningAnswerText);
-                    setStatus(`✅ Answer found`);
+                    setStatus(`✅ Answer: ${winningAnswerText}`);
                 }
             } catch (err) {
                 console.error('[VCOM-AI]', err);
@@ -658,7 +698,6 @@
 
         if (imgElements.length < 2 || clickableOptions.length < 2) return;
 
-        // Extract the word prompt from instructions or header
         const promptEl = questBox.querySelector('.instructions, .prompt, h3, .sentence') || questBox;
         const promptText = promptEl.innerText.replace(/choose the best picture for/i, '').trim();
 
@@ -782,7 +821,7 @@
 
     function startEngine() {
         injectUI();
-        logDebug('Vocab Solver Engine 2.0.0 started on ' + location.pathname);
+        logDebug('Vocab Solver Engine 2.0.1 started on ' + location.pathname);
 
         const observer = new MutationObserver(() => {
             checkAndSolve();
