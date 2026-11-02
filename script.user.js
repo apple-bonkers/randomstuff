@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      1.9.3
-// @description  Solves Vocabulary.com with aggressive rush-screen removal, multimodal image support, spelling auto-answer, and caching.
+// @version      2.0.0
+// @description  Solves Vocabulary.com (Text, Spelling, Picture Choices, Vocab Jam) with chain-of-thought accuracy, anti-lockout pacing, and image support.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -23,7 +23,8 @@
         API_KEY: 'vcom_ai_api_key',
         MODEL: 'vcom_ai_model',
         OR_MODEL: 'vcom_or_custom_model',
-        MODE: 'vcom_ai_mode',
+        MODE: 'vcom_ai_mode',       // 'highlight' | 'auto'
+        SPEED: 'vcom_ai_speed',     // 'safe' | 'fast' | 'instant'
         CACHE: 'vcom_ai_cache'
     };
 
@@ -38,11 +39,12 @@
     ];
 
     let config = {
-        provider: localStorage.getItem(STORAGE_KEYS.PROVIDER) || 'gemini',
+        provider: localStorage.getItem(STORAGE_KEYS.PROVIDER) || 'openrouter',
         apiKey: localStorage.getItem(STORAGE_KEYS.API_KEY) || '',
         model: localStorage.getItem(STORAGE_KEYS.MODEL) || 'gemini-flash-lite-latest',
-        orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'google/gemini-3.5-flash-lite',
-        mode: localStorage.getItem(STORAGE_KEYS.MODE) || 'highlight',
+        orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'deepseek/deepseek-chat',
+        mode: localStorage.getItem(STORAGE_KEYS.MODE) || 'auto',
+        speed: localStorage.getItem(STORAGE_KEYS.SPEED) || 'safe', // 'safe' prevents 5-min rush lockouts
         cache: JSON.parse(localStorage.getItem(STORAGE_KEYS.CACHE) || '{}')
     };
 
@@ -54,7 +56,7 @@
         const timestamp = new Date().toLocaleTimeString();
         const line = `[${timestamp}] ${msg}` + (obj ? ` | ${JSON.stringify(obj)}` : '');
         debugLogs.push(line);
-        if (debugLogs.length > 50) debugLogs.shift();
+        if (debugLogs.length > 60) debugLogs.shift();
         console.log(`[VCOM-AI] ${msg}`, obj || '');
     }
 
@@ -71,21 +73,26 @@
     }
 
     // ==========================================
-    // 2. AGGRESSIVE LOCKOUT / RUSH SCREEN REMOVER
+    // 2. BLOCKER & LOCKOUT MANAGEMENT
     // ==========================================
-    function removeBlocker() {
-        const selectors = '.blocker, .lockout-background, div[class*="lockout"], div[class*="rush"], .lockout-icon';
-        const blockers = document.querySelectorAll(selectors);
-        blockers.forEach(b => {
-            const container = b.closest('.lockout-background') || b.closest('.box-question') || b;
-            container.remove();
-            logDebug('Lockout/Rush screen obliterated.');
-            window.dispatchEvent(new Event('resize'));
-        });
+    function checkBlockersAndLockout() {
+        // 1. Remove legacy 5-second click blocker on practice pages
+        const legacyBlockers = document.querySelectorAll('.blocker');
+        legacyBlockers.forEach(b => b.remove());
+
+        // 2. Check for VocabTrainer 5-minute rush lockout
+        const lockout = document.querySelector('.lockout-background, div[class*="lockout"]');
+        if (lockout) {
+            const timeElem = lockout.querySelector('.lockout-continue-text b, b');
+            const remaining = timeElem ? timeElem.innerText.trim() : 'a few minutes';
+            setStatus(`⏸️ Cooldown Active: Pausing (${remaining}) to prevent account flag.`);
+            return true;
+        }
+        return false;
     }
 
     // ==========================================
-    // 3. FLOATING CONFIGURATION UI & MODEL SEARCH
+    // 3. FLOATING CONFIGURATION UI
     // ==========================================
     function injectUI() {
         if (document.getElementById('vcom-ai-panel')) return;
@@ -103,7 +110,7 @@
             #vcom-ai-panel {
                 position: fixed; bottom: 75px; right: 20px; z-index: 999999;
                 width: 330px; background: #0f172a; color: #f8fafc; border: 1px solid #334155;
-                border-radius: 12px; padding: 16px; font-family: system-ui, sans-serif;
+                border-radius: 12px; padding: 16px; font-family: system-ui, -apple-system, sans-serif;
                 font-size: 13px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); display: none;
             }
             #vcom-ai-panel.open { display: block; }
@@ -113,7 +120,7 @@
                 color: #38bdf8; border-bottom: 1px solid #1e293b; padding-bottom: 8px;
             }
             .vcom-ai-field { margin-bottom: 10px; }
-            .vcom-ai-field label { display: block; margin-bottom: 4px; color: #94a3b8; font-weight: 500; }
+            .vcom-ai-field label { display: block; margin-bottom: 4px; color: #94a3b8; font-weight: 500; font-size: 11px; }
             .vcom-ai-input, .vcom-ai-select {
                 width: 100%; padding: 7px; background: #1e293b; border: 1px solid #475569;
                 color: #fff; border-radius: 6px; box-sizing: border-box; font-size: 12px;
@@ -156,7 +163,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v1.9.3</span>
+                    <span>AI Vocab Solver v2.0.0</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
@@ -179,12 +186,22 @@
                         ${!isGemini ? '<button id="vcom-search-models-btn" class="vcom-ai-btn secondary" style="white-space:nowrap;">Search</button>' : ''}
                     </div>
                 </div>
-                <div class="vcom-ai-field">
-                    <label for="vcom-mode">Operating Mode</label>
-                    <select id="vcom-mode" class="vcom-ai-select">
-                        <option value="highlight" ${config.mode === 'highlight' ? 'selected' : ''}>Highlight Only</option>
-                        <option value="auto" ${config.mode === 'auto' ? 'selected' : ''}>Auto-Answer</option>
-                    </select>
+                <div class="vcom-ai-row" style="margin-bottom: 10px;">
+                    <div style="flex:1;">
+                        <label for="vcom-mode" style="display:block; margin-bottom:4px; color:#94a3b8; font-size:11px;">Mode</label>
+                        <select id="vcom-mode" class="vcom-ai-select">
+                            <option value="highlight" ${config.mode === 'highlight' ? 'selected' : ''}>Highlight</option>
+                            <option value="auto" ${config.mode === 'auto' ? 'selected' : ''}>Auto-Answer</option>
+                        </select>
+                    </div>
+                    <div style="flex:1;">
+                        <label for="vcom-speed" style="display:block; margin-bottom:4px; color:#94a3b8; font-size:11px;">Pacing (Anti-Lockout)</label>
+                        <select id="vcom-speed" class="vcom-ai-select">
+                            <option value="safe" ${config.speed === 'safe' ? 'selected' : ''}>Safe (3-5s)</option>
+                            <option value="fast" ${config.speed === 'fast' ? 'selected' : ''}>Fast (1.5-2.5s)</option>
+                            <option value="instant" ${config.speed === 'instant' ? 'selected' : ''}>Instant (0.8s)</option>
+                        </select>
+                    </div>
                 </div>
                 <div class="vcom-ai-status">
                     <span id="vcom-cache-count">Cached: ${Object.keys(config.cache).length}</span>
@@ -202,7 +219,7 @@
         modal.id = 'vcom-model-search-modal';
         modal.innerHTML = `
             <div style="font-weight:700; font-size:14px; margin-bottom:8px; color:#38bdf8;">Search OpenRouter Models</div>
-            <input type="text" id="vcom-model-filter" class="vcom-ai-input" placeholder="Type to filter (e.g., deepseek, claude, free)...">
+            <input type="text" id="vcom-model-filter" class="vcom-ai-input" placeholder="Type to filter (e.g. deepseek, gemini, flash)...">
             <div id="vcom-model-list"></div>
             <button id="vcom-close-modal" class="vcom-ai-btn secondary" style="margin-top:10px; width:100%;">Close</button>
         `;
@@ -267,6 +284,12 @@
                 checkAndSolve();
             });
 
+            document.getElementById('vcom-speed').addEventListener('change', (e) => {
+                config.speed = e.target.value;
+                localStorage.setItem(STORAGE_KEYS.SPEED, config.speed);
+                setStatus(`Pacing: ${config.speed}`);
+            });
+
             document.getElementById('vcom-clear-cache').addEventListener('click', () => {
                 config.cache = {};
                 localStorage.removeItem(STORAGE_KEYS.CACHE);
@@ -305,6 +328,8 @@
                     modal.classList.remove('open');
                     renderPanelBody();
                     setStatus(`Selected: ${chosenId}`);
+                    lastSolvedSignature = '';
+                    checkAndSolve();
                 });
             });
         }
@@ -346,7 +371,7 @@
         const questions = Array.from(document.querySelectorAll(selectors));
         for (let i = questions.length - 1; i >= 0; i--) {
             const q = questions[i];
-            if (isVisible(q) && (q.querySelector('.choices') || q.querySelector('.spelltheword') || q.querySelector('input[type="text"]') || q.querySelector('img') || q.querySelectorAll('button, a[href="#"]').length >= 2)) {
+            if (isVisible(q) && (q.querySelector('.choices') || q.querySelector('.spelltheword') || q.querySelector('input.wordspelling') || q.querySelector('img') || q.querySelectorAll('button, a[accesskey]').length >= 2)) {
                 return q;
             }
         }
@@ -372,139 +397,173 @@
         }
     }
 
-    async function captureElementAsBase64(element) {
-        try {
-            if (!window.html2canvas) {
-                await new Promise((resolve, reject) => {
-                    const script = document.createElement('script');
-                    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
-                    script.onload = resolve;
-                    script.onerror = reject;
-                    document.head.appendChild(script);
-                });
-            }
-            const canvas = await window.html2canvas(element, { scale: 1.0, useCORS: true, logging: false });
-            return canvas.toDataURL('image/jpeg', 0.85);
-        } catch (e) {
-            logDebug('Screenshot capture failed', e.message);
-            return null;
-        }
-    }
-
     // ==========================================
-    // 5. UNIFIED API CALL
+    // 5. BULLETPROOF API CALLS WITH TIMEOUT
     // ==========================================
-    async function callAI(systemPrompt, userPrompt, base64Image = null) {
+    async function callAI(systemPrompt, userPrompt, imageUrls = []) {
         if (!config.apiKey) {
             setStatus('⚠️ Missing API Key!');
             return null;
         }
 
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 16000);
+
         let endpoint, headers, body;
 
-        if (config.provider === 'gemini') {
-            endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent?key=${encodeURIComponent(config.apiKey)}`;
-            headers = { 'Content-Type': 'application/json' };
+        try {
+            if (config.provider === 'gemini') {
+                endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent?key=${encodeURIComponent(config.apiKey)}`;
+                headers = { 'Content-Type': 'application/json' };
 
-            let contentParts = [{ text: userPrompt }];
-            if (base64Image) {
-                const base64Data = base64Image.split(',')[1];
-                contentParts.push({
-                    inlineData: { mimeType: 'image/jpeg', data: base64Data }
+                let contentParts = [{ text: userPrompt }];
+                body = JSON.stringify({
+                    systemInstruction: { parts: [{ text: systemPrompt }] },
+                    contents: [{ parts: contentParts }],
+                    generationConfig: { temperature: 0.1, maxOutputTokens: 250 }
+                });
+            } else {
+                endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+                headers = {
+                    'Authorization': `Bearer ${config.apiKey}`,
+                    'Content-Type': 'application/json',
+                    'HTTP-Referer': 'https://vocabulary.com',
+                    'X-Title': 'Vocab AI Solver'
+                };
+
+                let userContent;
+                if (imageUrls && imageUrls.length > 0) {
+                    userContent = [{ type: 'text', text: userPrompt }];
+                    imageUrls.forEach(url => {
+                        userContent.push({ type: 'image_url', image_url: { url } });
+                    });
+                } else {
+                    userContent = userPrompt; // STRING FORMAT: Guaranteed compatibility with all OpenRouter text models
+                }
+
+                body = JSON.stringify({
+                    model: config.orModel,
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: userContent }
+                    ],
+                    temperature: 0.1,
+                    max_tokens: 350
                 });
             }
 
-            body = JSON.stringify({
-                systemInstruction: { parts: [{ text: systemPrompt }] },
-                contents: [{ parts: contentParts }],
-                generationConfig: { temperature: 0.0, maxOutputTokens: 100 }
-            });
-        } else {
-            endpoint = 'https://openrouter.ai/api/v1/chat/completions';
-            headers = {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Content-Type': 'application/json',
-                'HTTP-Referer': 'https://vocabulary.com',
-                'X-Title': 'Vocab AI Solver'
-            };
+            const res = await fetch(endpoint, { method: 'POST', headers, body, signal: controller.signal });
+            clearTimeout(timeoutId);
 
-            let userContent = [{ type: 'text', text: userPrompt }];
-            if (base64Image) {
-                userContent.push({ type: 'image_url', image_url: { url: base64Image } });
+            if (!res.ok) {
+                const errText = await res.text().catch(() => '');
+                logDebug(`HTTP ${res.status}`, errText.slice(0, 200));
+                throw new Error(`API Error ${res.status}`);
             }
 
-            body = JSON.stringify({
-                model: config.orModel,
-                messages: [
-                    { role: 'system', content: systemPrompt },
-                    { role: 'user', content: userContent }
-                ],
-                temperature: 0.0,
-                max_tokens: 300
-            });
-        }
+            const data = await res.json();
+            let reply = '';
+            if (config.provider === 'gemini') {
+                reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            } else {
+                reply = data?.choices?.[0]?.message?.content || '';
+            }
 
-        const res = await fetch(endpoint, { method: 'POST', headers, body });
-        if (!res.ok) {
-            const errText = await res.text().catch(() => '');
-            logDebug(`HTTP ${res.status}`, errText.slice(0, 200));
-            throw new Error(`API Error ${res.status}`);
+            if (typeof reply !== 'string') return '';
+            return reply.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+        } catch (err) {
+            clearTimeout(timeoutId);
+            throw err;
         }
-
-        const data = await res.json();
-        let reply = '';
-        if (config.provider === 'gemini') {
-            reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        } else {
-            reply = data?.choices?.[0]?.message?.content || '';
-        }
-
-        if (typeof reply !== 'string') return '';
-        return reply.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
     }
 
-    async function askAIMultipleChoice(questBox, promptText, choicesTextArray, isPictureChoice, base64Img) {
-        let systemInstruction, userPrompt;
-
-        if (isPictureChoice) {
-            systemInstruction = "You are an expert Vocabulary.com picture-choice question solver. Examine the attached image showing a word prompt and 4 picture options. Select the correct picture option. Respond with ONLY the exact text label or description of the correct choice.";
-            userPrompt = `Word/Prompt: ${promptText}\n\nSelect the correct option from the image.`;
+    // Extracts final answer from chain-of-thought responses
+    function extractFinalAnswer(rawReply) {
+        if (!rawReply) return '';
+        let clean = rawReply.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+        const match = clean.match(/(?:ANSWER|CORRECT(?: ANSWER)?|CHOICE):\s*([^\n\r]+)/i);
+        if (match && match[1]) {
+            clean = match[1].trim();
         } else {
-            systemInstruction = "You are an expert Vocabulary.com lexical assistant. Analyze the prompt and options carefully. Select the option that is a true dictionary synonym or precise definition match. Respond with ONLY the exact text of the correct choice. No punctuation, bullet points, or quotes.";
-            userPrompt = `Question / Prompt:\n${promptText}\n\nAvailable Choices:\n${choicesTextArray.map(c => `- ${c}`).join('\n')}`;
+            const lines = clean.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+            if (lines.length > 0) clean = lines[lines.length - 1];
         }
+        return clean.replace(/^["'*\s]+|["'*\s]+$/g, '').trim();
+    }
 
-        const rawReply = await callAI(systemInstruction, userPrompt, base64Img);
+    async function askAIMultipleChoice(promptText, choicesTextArray) {
+        const systemInstruction = 
+            "You are an expert Vocabulary.com test solver. Analyze the sentence, question prompt, and multiple-choice options.\n" +
+            "Think step-by-step: eliminate the incorrect distractors based on exact dictionary definitions and part of speech.\n" +
+            "Then, on your final line, output your selection strictly in this format:\n" +
+            "ANSWER: <exact text of the chosen option>";
+
+        const userPrompt = `Question Context / Prompt:\n${promptText}\n\nAvailable Options:\n${choicesTextArray.map(c => `- ${c}`).join('\n')}`;
+
+        const rawReply = await callAI(systemInstruction, userPrompt);
         logDebug('AI raw reply', rawReply);
 
-        if (!rawReply) return null;
-        const cleanedReply = rawReply.replace(/^["']|["']$/g, '').trim();
+        const parsed = extractFinalAnswer(rawReply);
+        logDebug('Parsed final answer', parsed);
 
-        if (promptText.toLowerCase().includes(cleanedReply.toLowerCase())) {
-            logDebug('AI mistakenly returned question prompt. Rejecting.');
-            return null;
-        }
+        if (!parsed) return null;
 
-        let matched = choicesTextArray.find(c => c.toLowerCase().trim() === cleanedReply.toLowerCase());
-        if (!matched && cleanedReply.length >= 3) {
-            matched = choicesTextArray.find(c => c.toLowerCase().includes(cleanedReply.toLowerCase()));
+        // 1. Exact match
+        let matched = choicesTextArray.find(c => c.toLowerCase().trim() === parsed.toLowerCase());
+        // 2. Substring match
+        if (!matched && parsed.length >= 3) {
+            matched = choicesTextArray.find(c => c.toLowerCase().includes(parsed.toLowerCase()) || parsed.toLowerCase().includes(c.toLowerCase()));
         }
 
         return matched || null;
     }
 
-    async function askAISpelling(promptContext) {
-        const systemInstruction = "You are a Vocabulary.com spelling solver. Given the definition or sentence context, return ONLY the exact single vocabulary word being asked to spell. No punctuation, quotes, or explanation.";
-        const rawReply = await callAI(systemInstruction, promptContext);
-        return rawReply ? rawReply.replace(/[^a-zA-Z-]/g, '') : null;
+    async function askAISpelling(sentenceContext) {
+        const systemInstruction = 
+            "You are an expert Vocabulary.com spelling solver.\n" +
+            "You are given a sentence with missing blanks (________).\n" +
+            "Determine the single vocabulary word that precisely fits the sentence context and meaning.\n" +
+            "On your final line, output strictly:\n" +
+            "ANSWER: <single lowercase word>";
+
+        const rawReply = await callAI(systemInstruction, `Sentence:\n${sentenceContext}`);
+        logDebug('AI spelling reply', rawReply);
+
+        const parsed = extractFinalAnswer(rawReply);
+        return parsed ? parsed.toLowerCase().replace(/[^a-z-]/g, '') : null;
+    }
+
+    async function askAIPictureChoice(wordPrompt, pictureUrls) {
+        const systemInstruction = 
+            "You are an expert Vocabulary.com picture-choice solver.\n" +
+            "You are given a target vocabulary word and 4 images arranged in order:\n" +
+            "Option 1: Top-Left, Option 2: Top-Right, Option 3: Bottom-Left, Option 4: Bottom-Right.\n" +
+            "Select the single image option number (1, 2, 3, or 4) that correctly illustrates the target word.\n" +
+            "On your final line, output strictly:\n" +
+            "ANSWER: <1, 2, 3, or 4>";
+
+        const userPrompt = `Target Word Prompt: "${wordPrompt}"\nWhich option (1, 2, 3, or 4) matches this word?`;
+
+        const rawReply = await callAI(systemInstruction, userPrompt, pictureUrls);
+        logDebug('AI picture reply', rawReply);
+
+        const parsed = extractFinalAnswer(rawReply);
+        const num = parseInt(parsed.replace(/[^0-9]/g, ''), 10);
+        return (!isNaN(num) && num >= 1 && num <= 4) ? num : null;
     }
 
     // ==========================================
     // 6. QUESTION SOLVING PIPELINE
     // ==========================================
-    function triggerHumanDelay(callback) {
-        const delay = Math.floor(Math.random() * 301) + 400;
-        setTimeout(callback, delay);
+    function getPacingDelay() {
+        if (config.speed === 'instant') {
+            return Math.floor(Math.random() * 200) + 700; // 700-900ms
+        } else if (config.speed === 'fast') {
+            return Math.floor(Math.random() * 1000) + 1500; // 1.5s - 2.5s
+        } else {
+            // 'safe' - prevents 5-minute cooldown break
+            return Math.floor(Math.random() * 1500) + 3200; // 3.2s - 4.7s
+        }
     }
 
     function checkNextButton() {
@@ -519,37 +578,35 @@
 
         if (nxtBtn && !nxtBtn.dataset.autoClicked) {
             nxtBtn.dataset.autoClicked = "true";
-            triggerHumanDelay(() => {
+            setTimeout(() => {
                 nxtBtn.click();
-                setTimeout(() => { delete nxtBtn.dataset.autoClicked; }, 1200);
-            });
+                setTimeout(() => { delete nxtBtn.dataset.autoClicked; }, 1500);
+            }, getPacingDelay());
         }
     }
 
     async function handleMultipleChoice(questBox, choicesContainer) {
-        const choiceElements = Array.from(choicesContainer.children).filter(el => el.innerText.trim().length > 0);
-        const isPictureChoice = questBox.querySelector('img') !== null && choiceElements.length === 0;
-        let pictureChoices = [];
+        const choiceElements = Array.from(choicesContainer.querySelectorAll('a, div.choice, .choices > *'))
+            .filter(el => isVisible(el) && getCleanChoiceText(el).length > 0);
 
-        if (isPictureChoice) {
-            const imgBoxes = Array.from(questBox.querySelectorAll('.choice, div[class*="image"], div[class*="picture"], a'));
-            if (imgBoxes.length > 0) pictureChoices = imgBoxes;
+        if (choiceElements.length === 0) return;
+
+        // Skip if already answered and showing review/next button
+        if (choiceElements.some(el => el.classList.contains('correct') || el.classList.contains('incorrect'))) {
+            checkNextButton();
+            return;
         }
 
-        const effectiveChoices = isPictureChoice ? pictureChoices : choiceElements;
-        if (effectiveChoices.length === 0) return;
+        const choicesText = choiceElements.map(getCleanChoiceText);
 
-        const choicesText = isPictureChoice ? effectiveChoices.map((_, idx) => `Picture Option ${idx + 1}`) : effectiveChoices.map(getCleanChoiceText);
-        
         const clone = questBox.cloneNode(true);
         const cloneChoices = clone.querySelector('.choices') || clone.querySelector('ul[class*="choice"]');
         if (cloneChoices) cloneChoices.remove();
         const fullPrompt = clone.innerText.trim();
 
-        if (!fullPrompt && !isPictureChoice) return;
+        if (!fullPrompt) return;
 
-        const cacheKey = generateCacheKey(fullPrompt || 'picture-choice', choicesText);
-
+        const cacheKey = generateCacheKey(fullPrompt, choicesText);
         if (cacheKey === lastSolvedSignature) return;
         lastSolvedSignature = cacheKey;
 
@@ -561,12 +618,7 @@
             const activeModelName = config.provider === 'gemini' ? config.model : config.orModel;
             setStatus(`🤖 Asking ${activeModelName}...`);
             try {
-                let base64Img = null;
-                if (isPictureChoice) {
-                    base64Img = await captureElementAsBase64(questBox);
-                }
-
-                winningAnswerText = await askAIMultipleChoice(questBox, fullPrompt || 'Choose the best picture', choicesText, isPictureChoice, base64Img);
+                winningAnswerText = await askAIMultipleChoice(fullPrompt, choicesText);
                 if (winningAnswerText) {
                     saveCache(cacheKey, winningAnswerText);
                     setStatus(`✅ Answer found`);
@@ -583,7 +635,7 @@
             return;
         }
 
-        const targetElement = effectiveChoices.find(el => {
+        const targetElement = choiceElements.find(el => {
             const clean = getCleanChoiceText(el).toLowerCase();
             const target = winningAnswerText.trim().toLowerCase();
             return clean === target || clean.includes(target) || target.includes(clean);
@@ -593,21 +645,70 @@
             applyReferenceHighlight(targetElement);
 
             if (config.mode === 'auto') {
-                triggerHumanDelay(() => {
+                setTimeout(() => {
                     targetElement.click();
-                });
+                }, getPacingDelay());
+            }
+        }
+    }
+
+    async function handlePictureChoice(questBox) {
+        const imgElements = Array.from(questBox.querySelectorAll('img')).filter(img => isVisible(img) && img.src && !img.src.includes('avatar') && !img.src.includes('logo'));
+        const clickableOptions = Array.from(questBox.querySelectorAll('.choices a, a[accesskey], div.choice, .picture-choice, .item-play a')).filter(isVisible);
+
+        if (imgElements.length < 2 || clickableOptions.length < 2) return;
+
+        // Extract the word prompt from instructions or header
+        const promptEl = questBox.querySelector('.instructions, .prompt, h3, .sentence') || questBox;
+        const promptText = promptEl.innerText.replace(/choose the best picture for/i, '').trim();
+
+        const cacheKey = `pic|||${promptText.toLowerCase()}`;
+        if (cacheKey === lastSolvedSignature) return;
+        lastSolvedSignature = cacheKey;
+
+        let optionNumber = config.cache[cacheKey];
+
+        if (optionNumber) {
+            setStatus(`⚡ Solved from cache: Option ${optionNumber}`);
+        } else {
+            const activeModelName = config.provider === 'gemini' ? config.model : config.orModel;
+            setStatus(`🤖 Visual solve via ${activeModelName}...`);
+            try {
+                const imgUrls = imgElements.slice(0, 4).map(img => img.src);
+                optionNumber = await askAIPictureChoice(promptText, imgUrls);
+                if (optionNumber) {
+                    saveCache(cacheKey, String(optionNumber));
+                    setStatus(`✅ Option ${optionNumber} selected`);
+                }
+            } catch (err) {
+                setStatus(`❌ Visual error: ${err.message}`);
+                return;
+            }
+        }
+
+        if (optionNumber && optionNumber <= clickableOptions.length) {
+            const targetElement = clickableOptions[optionNumber - 1];
+            applyReferenceHighlight(targetElement);
+
+            if (config.mode === 'auto') {
+                setTimeout(() => {
+                    targetElement.click();
+                }, getPacingDelay());
             }
         }
     }
 
     async function handleSpelling(questBox) {
-        const inp = questBox.querySelector('input[type="text"]') || questBox.querySelector('.spelltheword input');
-        const submit = questBox.querySelector('.submit, button[type="submit"]');
-        const label = questBox.querySelector('.spelltheword, label');
-        if (!inp) return;
+        const inp = questBox.querySelector('input.wordspelling, input[type="text"]');
+        const submitBtn = questBox.querySelector('button.spellit, button[type="submit"]');
+        const label = questBox.querySelector('.spelltheword .label, .label');
+        const sentenceElem = questBox.querySelector('.sentence.blanked, .sentence');
 
-        const contextText = questBox.innerText.trim();
-        const cacheKey = `spell|||${contextText.toLowerCase().replace(/\s+/g, ' ')}`;
+        if (!inp || !sentenceElem) return;
+
+        const sentenceText = sentenceElem.innerText.trim();
+        const cacheKey = `spell|||${sentenceText.toLowerCase().replace(/\s+/g, ' ')}`;
+
         if (cacheKey === lastSolvedSignature) return;
         lastSolvedSignature = cacheKey;
 
@@ -617,8 +718,11 @@
             const activeModelName = config.provider === 'gemini' ? config.model : config.orModel;
             setStatus(`🤖 Spelling via ${activeModelName}...`);
             try {
-                wordAnswer = await askAISpelling(contextText);
-                if (wordAnswer) saveCache(cacheKey, wordAnswer);
+                wordAnswer = await askAISpelling(sentenceText);
+                if (wordAnswer) {
+                    saveCache(cacheKey, wordAnswer);
+                    setStatus(`✅ Spell: ${wordAnswer}`);
+                }
             } catch (err) {
                 setStatus(`❌ ${err.message}`);
                 return;
@@ -628,58 +732,59 @@
         }
 
         if (wordAnswer) {
+            inp.value = wordAnswer;
+            inp.dispatchEvent(new Event('input', { bubbles: true }));
+            inp.dispatchEvent(new Event('change', { bubbles: true }));
+
             if (label) {
                 label.style.color = "springgreen";
-                label.innerText = `Answer: ${wordAnswer} 🧠`;
+                label.innerText = `Spell the word: ${wordAnswer} 🧠`;
             }
-            setStatus(`✅ Spell: ${wordAnswer}`);
 
             if (config.mode === 'auto') {
-                triggerHumanDelay(() => {
-                    inp.value = wordAnswer;
-                    inp.dispatchEvent(new Event('input', { bubbles: true }));
+                setTimeout(() => {
                     inp.blur();
-                    if (submit) {
-                        setTimeout(() => submit.click(), 350);
-                    }
-                });
+                    if (submitBtn) submitBtn.click();
+                }, getPacingDelay());
             }
         }
     }
 
     // ==========================================
-    // 7. MUTATION OBSERVER & POLLING
+    // 7. MAIN ENGINE & OBSERVER
     // ==========================================
     async function checkAndSolve() {
-        removeBlocker();
+        if (checkBlockersAndLockout()) return;
         checkNextButton();
+
         if (isProcessing) return;
 
         const questBox = findActiveQuestionBox();
         if (!questBox) return;
 
         const choicesContainer = questBox.querySelector('.choices') || questBox.querySelector('ul[class*="choice"]');
-        const spellInput = questBox.querySelector('.spelltheword, input[type="text"]');
-        const hasImages = questBox.querySelector('img') !== null;
+        const spellInput = questBox.querySelector('input.wordspelling, .spelltheword');
+        const imgElements = questBox.querySelectorAll('img');
 
         isProcessing = true;
         try {
-            if ((choicesContainer && choicesContainer.children.length > 0) || hasImages) {
-                await handleMultipleChoice(questBox, choicesContainer || questBox);
-            } else if (spellInput) {
+            if (spellInput) {
                 await handleSpelling(questBox);
+            } else if (imgElements.length >= 2 && (!choicesContainer || choicesContainer.children.length === 0)) {
+                await handlePictureChoice(questBox);
+            } else if (choicesContainer && choicesContainer.children.length > 0) {
+                await handleMultipleChoice(questBox, choicesContainer);
             }
         } finally {
             isProcessing = false;
         }
     }
 
-    function startObserver() {
+    function startEngine() {
         injectUI();
-        logDebug('Solver initialized on ' + location.pathname);
+        logDebug('Vocab Solver Engine 2.0.0 started on ' + location.pathname);
 
         const observer = new MutationObserver(() => {
-            removeBlocker();
             checkAndSolve();
         });
 
@@ -690,18 +795,13 @@
             attributeFilter: ['class', 'style']
         });
 
-        // Continuous aggressive sweeper to annihilate the lockout screen instantly
-        setInterval(() => {
-            removeBlocker();
-            checkAndSolve();
-        }, 200);
-
+        setInterval(checkAndSolve, 400);
         checkAndSolve();
     }
 
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', startObserver);
+        document.addEventListener('DOMContentLoaded', startEngine);
     } else {
-        startObserver();
+        startEngine();
     }
 })();
