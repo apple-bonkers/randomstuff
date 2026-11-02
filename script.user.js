@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      1.7.1
+// @version      1.8.0
 // @description  Solves Vocabulary.com with deep reasoning model support (DeepSeek-R1), robust choice parsing, auto-correction, and caching.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
