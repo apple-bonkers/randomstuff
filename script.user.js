@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      1.7.1
-// @description  Solves Vocabulary.com with deep reasoning model support (DeepSeek-R1), robust choice parsing, auto-correction, and caching.
+// @version      1.7.2
+// @description  Solves Vocabulary.com with robust text-matching for reasoning models (DeepSeek-R1), auto-correction, and caching.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -150,7 +150,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v1.7.1</span>
+                    <span>AI Vocab Solver v1.7.2</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
@@ -383,7 +383,7 @@
             body = JSON.stringify({
                 systemInstruction: { parts: [{ text: systemPrompt }] },
                 contents: [{ parts: [{ text: userPrompt }] }],
-                generationConfig: { temperature: 0.0, maxOutputTokens: 60 }
+                generationConfig: { temperature: 0.0, maxOutputTokens: 150 }
             });
         } else {
             endpoint = 'https://openrouter.ai/api/v1/chat/completions';
@@ -400,7 +400,7 @@
                     { role: 'user', content: userPrompt }
                 ],
                 temperature: 0.0,
-                max_tokens: 150
+                max_tokens: 300
             });
         }
 
@@ -427,23 +427,20 @@
     }
 
     async function askAIMultipleChoice(promptText, choicesTextArray) {
-        const formattedChoices = choicesTextArray.map((c, idx) => `${idx}: ${c}`).join('\n');
-        const systemInstruction = "You are a precise Vocabulary.com question solver. Analyze the question prompt and the numbered options. Respond with ONLY the single integer index (0, 1, 2, or 3) of the correct choice. Do not include any words, punctuation, or explanation.";
-        const userPrompt = `Question / Word Prompt:\n${promptText}\n\nNumbered Options:\n${formattedChoices}`;
+        const formattedChoices = choicesTextArray.map(c => `- ${c}`).join('\n');
+        const systemInstruction = "You are an expert Vocabulary.com solver. Analyze the question prompt and the available choices. Respond with ONLY the exact text of the correct choice from the list. Do not include bullet points, quotes, explanations, or punctuation.";
+        const userPrompt = `Question / Prompt:\n${promptText}\n\nAvailable Choices:\n${formattedChoices}`;
 
         const rawReply = await callAI(systemInstruction, userPrompt);
         logDebug('AI raw reply', rawReply);
 
         if (!rawReply) return null;
 
-        const parsedIndex = parseInt(rawReply.replace(/[^0-9]/g, ''), 10);
-        if (!isNaN(parsedIndex) && parsedIndex >= 0 && parsedIndex < choicesTextArray.length) {
-            return choicesTextArray[parsedIndex];
-        }
+        const cleanedReply = rawReply.replace(/^["']|["']$/g, '').trim();
 
         const matched = choicesTextArray.find(c => {
             const cleanC = c.toLowerCase().trim();
-            const cleanR = rawReply.toLowerCase().trim();
+            const cleanR = cleanedReply.toLowerCase().trim();
             return cleanC === cleanR || cleanC.includes(cleanR) || cleanR.includes(cleanC);
         });
 
