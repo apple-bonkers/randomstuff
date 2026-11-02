@@ -1,13 +1,15 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      1.3.0
+// @version      1.4.0
 // @description  Solves Vocabulary.com with Gemini models, auto-removes "Try not to rush!", auto-answers spelling & multiple choice, and caches answers.
-// @author       apple-bonkers
+// @author       You
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
 // @grant        none
 // @license      MIT
+// @downloadURL  https://raw.githubusercontent.com/apple-bonkers/randomstuff/refs/heads/main/script.user.js
+// @updateURL    https://raw.githubusercontent.com/apple-bonkers/randomstuff/refs/heads/main/script.user.js
 // ==/UserScript==
 
 (function () {
@@ -190,7 +192,7 @@
         panel.classList.add('open');
         panel.innerHTML = `
             <div class="vcom-ai-header">
-                <span>Gemini Vocab Solver v1.3</span>
+                <span>Gemini Vocab Solver v1.4</span>
                 <span style="font-size: 11px; color: #64748b;">Alt+G</span>
             </div>
             <div class="vcom-ai-field">
@@ -368,7 +370,6 @@
         const rawReply = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
         logDebug('Gemini raw reply', rawReply);
 
-        // Find exact or substring match among choices
         const matched = choicesTextArray.find(c => {
             const cleanC = c.toLowerCase().trim();
             const cleanR = rawReply.toLowerCase().trim();
