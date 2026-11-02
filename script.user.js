@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      1.6.0
-// @description  Solves Vocabulary.com with bulletproof error handling, auto-correction on wrong answers, live model search, and caching.
+// @version      1.7.0
+// @description  Solves Vocabulary.com with deep reasoning model support (DeepSeek-R1), robust choice parsing, auto-correction, and caching.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -75,9 +75,7 @@
     // ==========================================
     function removeBlocker() {
         const blocker = document.querySelector('.blocker');
-        if (blocker) {
-            blocker.remove();
-        }
+        if (blocker) blocker.remove();
     }
 
     // ==========================================
@@ -152,7 +150,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v1.7</span>
+                    <span>AI Vocab Solver v1.9</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
@@ -369,7 +367,7 @@
     }
 
     // ==========================================
-    // 5. UNIFIED API CALL WITH SAFE NULL HANDLING
+    // 5. UNIFIED API CALL WITH R1 REASONING STRIPPER
     // ==========================================
     async function callAI(systemPrompt, userPrompt) {
         if (!config.apiKey) {
@@ -402,7 +400,7 @@
                     { role: 'user', content: userPrompt }
                 ],
                 temperature: 0.0,
-                max_tokens: 60
+                max_tokens: 150
             });
         }
 
@@ -420,26 +418,38 @@
         } else {
             reply = data?.choices?.[0]?.message?.content || '';
         }
-        return typeof reply === 'string' ? reply.trim() : '';
+
+        if (typeof reply !== 'string') return '';
+
+        // Strip out DeepSeek-R1 <think>...</think> blocks if present
+        reply = reply.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+        return reply;
     }
 
     async function askAIMultipleChoice(promptText, choicesTextArray) {
-        const formattedChoices = choicesTextArray.map(c => `- ${c}`).join('\n');
-        const systemInstruction = "You are an expert lexicographer and Vocabulary.com solver. Look at the word/question prompt and the available choices. Return EXACTLY and ONLY the text of the single correct choice from the list. Do not add quotes, explanations, or punctuation.";
-        const userPrompt = `Question / Word Prompt:\n${promptText}\n\nAvailable Options:\n${formattedChoices}`;
+        const formattedChoices = choicesTextArray.map((c, idx) => `${idx}: ${c}`).join('\n');
+        const systemInstruction = "You are a precise Vocabulary.com question solver. Analyze the question prompt and the numbered options. Respond with ONLY the single integer index (0, 1, 2, or 3) of the correct choice. Do not include any words, punctuation, or explanation.";
+        const userPrompt = `Question / Word Prompt:\n${promptText}\n\nNumbered Options:\n${formattedChoices}`;
 
         const rawReply = await callAI(systemInstruction, userPrompt);
         logDebug('AI raw reply', rawReply);
 
         if (!rawReply) return null;
 
+        // 1. Try parsing integer index
+        const parsedIndex = parseInt(rawReply.replace(/[^0-9]/g, ''), 10);
+        if (!isNaN(parsedIndex) && parsedIndex >= 0 && parsedIndex < choicesTextArray.length) {
+            return choicesTextArray[parsedIndex];
+        }
+
+        // 2. Fallback text matching
         const matched = choicesTextArray.find(c => {
             const cleanC = c.toLowerCase().trim();
             const cleanR = rawReply.toLowerCase().trim();
             return cleanC === cleanR || cleanC.includes(cleanR) || cleanR.includes(cleanC);
         });
 
-        return matched || rawReply;
+        return matched || choicesTextArray[0];
     }
 
     async function askAISpelling(promptContext) {
@@ -489,7 +499,6 @@
 
         const cacheKey = generateCacheKey(fullPrompt, choicesText);
 
-        // Auto-Correction / Passive Learning: If user or auto-answer reveals the correct answer in DOM, cache it!
         const correctEl = choiceElements.find(el => el.classList.contains('correct'));
         if (correctEl) {
             saveCache(cacheKey, getCleanChoiceText(correctEl));
@@ -540,7 +549,6 @@
             }
         }
 
-        // Listen for clicks to learn if the answer was correct/incorrect
         choiceElements.forEach(el => {
             if (el.dataset.listenerAttached) return;
             el.dataset.listenerAttached = 'true';
