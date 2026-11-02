@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      1.7.2
+// @version      1.7.0
 // @description  Solves Vocabulary.com with robust text-matching for reasoning models (DeepSeek-R1), auto-correction, and caching.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
@@ -150,7 +150,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v1.7.2</span>
+                    <span>AI Vocab Solver v1.7.0</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
@@ -383,7 +383,7 @@
             body = JSON.stringify({
                 systemInstruction: { parts: [{ text: systemPrompt }] },
                 contents: [{ parts: [{ text: userPrompt }] }],
-                generationConfig: { temperature: 0.0, maxOutputTokens: 150 }
+                generationConfig: { temperature: 0.0, maxOutputTokens: 60 }
             });
         } else {
             endpoint = 'https://openrouter.ai/api/v1/chat/completions';
@@ -428,7 +428,7 @@
 
     async function askAIMultipleChoice(promptText, choicesTextArray) {
         const formattedChoices = choicesTextArray.map(c => `- ${c}`).join('\n');
-        const systemInstruction = "You are an expert Vocabulary.com solver. Analyze the question prompt and the available choices. Respond with ONLY the exact text of the correct choice from the list. Do not include bullet points, quotes, explanations, or punctuation.";
+        const systemInstruction = "You are a precise Vocabulary.com question solver. Analyze the question prompt and the available choices. Respond with ONLY the exact text of the correct choice from the list. Do not include bullet points, quotes, explanations, or punctuation.";
         const userPrompt = `Question / Prompt:\n${promptText}\n\nAvailable Choices:\n${formattedChoices}`;
 
         const rawReply = await callAI(systemInstruction, userPrompt);
@@ -494,167 +494,4 @@
 
         const cacheKey = generateCacheKey(fullPrompt, choicesText);
 
-        const correctEl = choiceElements.find(el => el.classList.contains('correct'));
-        if (correctEl) {
-            saveCache(cacheKey, getCleanChoiceText(correctEl));
-            return;
-        }
-
-        if (cacheKey === lastSolvedSignature) return;
-        lastSolvedSignature = cacheKey;
-
-        let winningAnswerText = config.cache[cacheKey];
-
-        if (winningAnswerText) {
-            setStatus('⚡ Solved from local cache');
-        } else {
-            const activeModelName = config.provider === 'gemini' ? config.model : config.orModel;
-            setStatus(`🤖 Asking ${activeModelName}...`);
-            try {
-                winningAnswerText = await askAIMultipleChoice(fullPrompt, choicesText);
-                if (winningAnswerText) {
-                    saveCache(cacheKey, winningAnswerText);
-                    setStatus(`✅ Answer found`);
-                }
-            } catch (err) {
-                console.error('[VCOM-AI]', err);
-                setStatus(`❌ ${err.message}`);
-                return;
-            }
-        }
-
-        if (!winningAnswerText) {
-            setStatus('⚠️ Could not determine answer');
-            return;
-        }
-
-        const targetElement = choiceElements.find(el => {
-            const clean = getCleanChoiceText(el).toLowerCase();
-            const target = winningAnswerText.trim().toLowerCase();
-            return clean === target || clean.includes(target) || target.includes(clean);
-        });
-
-        if (targetElement) {
-            applyReferenceHighlight(targetElement);
-
-            if (config.mode === 'auto') {
-                triggerHumanDelay(() => {
-                    targetElement.click();
-                });
-            }
-        }
-
-        choiceElements.forEach(el => {
-            if (el.dataset.listenerAttached) return;
-            el.dataset.listenerAttached = 'true';
-            el.addEventListener('click', () => {
-                setTimeout(() => {
-                    const actualCorrect = choiceElements.find(c => c.classList.contains('correct'));
-                    if (actualCorrect) {
-                        saveCache(cacheKey, getCleanChoiceText(actualCorrect));
-                        setStatus('🧠 Cached correct answer from result');
-                    }
-                }, 400);
-            });
-        });
-    }
-
-    async function handleSpelling(questBox) {
-        const inp = questBox.querySelector('input[type="text"]') || questBox.querySelector('.spelltheword input');
-        const submit = questBox.querySelector('.submit, button[type="submit"]');
-        const label = questBox.querySelector('.spelltheword, label');
-        if (!inp) return;
-
-        const contextText = questBox.innerText.trim();
-        const cacheKey = `spell|||${contextText.toLowerCase().replace(/\s+/g, ' ')}`;
-        if (cacheKey === lastSolvedSignature) return;
-        lastSolvedSignature = cacheKey;
-
-        let wordAnswer = config.cache[cacheKey];
-
-        if (!wordAnswer) {
-            const activeModelName = config.provider === 'gemini' ? config.model : config.orModel;
-            setStatus(`🤖 Spelling via ${activeModelName}...`);
-            try {
-                wordAnswer = await askAISpelling(contextText);
-                if (wordAnswer) saveCache(cacheKey, wordAnswer);
-            } catch (err) {
-                setStatus(`❌ ${err.message}`);
-                return;
-            }
-        } else {
-            setStatus('⚡ Spelling loaded from cache');
-        }
-
-        if (wordAnswer) {
-            if (label) {
-                label.style.color = "springgreen";
-                label.innerText = `Answer: ${wordAnswer} 🧠`;
-            }
-            setStatus(`✅ Spell: ${wordAnswer}`);
-
-            if (config.mode === 'auto') {
-                triggerHumanDelay(() => {
-                    inp.value = wordAnswer;
-                    inp.dispatchEvent(new Event('input', { bubbles: true }));
-                    inp.blur();
-                    if (submit) {
-                        setTimeout(() => submit.click(), 350);
-                    }
-                });
-            }
-        }
-    }
-
-    // ==========================================
-    // 7. MUTATION OBSERVER & POLLING
-    // ==========================================
-    async function checkAndSolve() {
-        removeBlocker();
-        checkNextButton();
-        if (isProcessing) return;
-
-        const questBox = findActiveQuestionBox();
-        if (!questBox) return;
-
-        const choicesContainer = questBox.querySelector('.choices') || questBox.querySelector('ul[class*="choice"]');
-        const spellInput = questBox.querySelector('.spelltheword, input[type="text"]');
-
-        isProcessing = true;
-        try {
-            if (choicesContainer && choicesContainer.children.length > 0) {
-                await handleMultipleChoice(questBox, choicesContainer);
-            } else if (spellInput) {
-                await handleSpelling(questBox);
-            }
-        } finally {
-            isProcessing = false;
-        }
-    }
-
-    function startObserver() {
-        injectUI();
-        logDebug('Solver initialized on ' + location.pathname);
-
-        const observer = new MutationObserver(() => {
-            removeBlocker();
-            checkAndSolve();
-        });
-
-        observer.observe(document.body, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ['class', 'style']
-        });
-
-        setInterval(checkAndSolve, 500);
-        checkAndSolve();
-    }
-
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', startObserver);
-    } else {
-        startObserver();
-    }
-})();
+        const correctEl = choiceElements.find(el => el.classList.contains('correct
