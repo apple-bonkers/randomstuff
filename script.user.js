@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Vocabulary.com Gemini AI Solver
+// @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      1.4.0
-// @description  Solves Vocabulary.com with Gemini models, auto-removes "Try not to rush!", auto-answers spelling & multiple choice, and caches answers.
+// @version      1.5.0
+// @description  Solves Vocabulary.com (Practice, Trainer, and Vocab Jam) using Gemini or OpenRouter models with a live model search tool, auto-removes blockers, and caches answers.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -19,13 +19,15 @@
     // 1. STATE & STORAGE MANAGEMENT
     // ==========================================
     const STORAGE_KEYS = {
-        API_KEY: 'vcom_gemini_api_key',
-        MODEL: 'vcom_gemini_model',
-        MODE: 'vcom_gemini_mode', // 'highlight' | 'auto'
-        CACHE: 'vcom_gemini_cache'
+        PROVIDER: 'vcom_ai_provider', // 'gemini' | 'openrouter'
+        API_KEY: 'vcom_ai_api_key',
+        MODEL: 'vcom_ai_model',
+        OR_MODEL: 'vcom_or_custom_model',
+        MODE: 'vcom_ai_mode', // 'highlight' | 'auto'
+        CACHE: 'vcom_ai_cache'
     };
 
-    const AVAILABLE_MODELS = [
+    const GEMINI_MODELS = [
         { id: 'gemini-flash-lite-latest', label: 'gemini-flash-lite-latest (Fastest Alias)' },
         { id: 'gemini-flash-latest', label: 'gemini-flash-latest (Balanced Alias)' },
         { id: 'gemini-pro-latest', label: 'gemini-pro-latest (Pro Alias)' },
@@ -36,8 +38,10 @@
     ];
 
     let config = {
+        provider: localStorage.getItem(STORAGE_KEYS.PROVIDER) || 'gemini',
         apiKey: localStorage.getItem(STORAGE_KEYS.API_KEY) || '',
         model: localStorage.getItem(STORAGE_KEYS.MODEL) || 'gemini-flash-lite-latest',
+        orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'google/gemini-flash-1.5',
         mode: localStorage.getItem(STORAGE_KEYS.MODE) || 'highlight',
         cache: JSON.parse(localStorage.getItem(STORAGE_KEYS.CACHE) || '{}')
     };
@@ -51,7 +55,7 @@
         const line = `[${timestamp}] ${msg}` + (obj ? ` | ${JSON.stringify(obj)}` : '');
         debugLogs.push(line);
         if (debugLogs.length > 50) debugLogs.shift();
-        console.log(`[VCOM-Gemini] ${msg}`, obj || '');
+        console.log(`[VCOM-AI] ${msg}`, obj || '');
     }
 
     function saveCache(hash, answerText) {
@@ -66,7 +70,7 @@
     }
 
     // ==========================================
-    // 2. AUTO-REMOVE "TRY NOT TO RUSH!" BLOCKER
+    // 2. AUTO-REMOVE BLOCKER
     // ==========================================
     function removeBlocker() {
         const blocker = document.querySelector('.blocker');
@@ -77,7 +81,7 @@
     }
 
     // ==========================================
-    // 3. FLOATING CONFIGURATION UI
+    // 3. FLOATING CONFIGURATION UI & MODEL SEARCH
     // ==========================================
     function injectUI() {
         if (document.getElementById('vcom-ai-panel')) return;
@@ -109,7 +113,7 @@
                 bottom: 75px;
                 right: 20px;
                 z-index: 999999;
-                width: 320px;
+                width: 330px;
                 background: #0f172a;
                 color: #f8fafc;
                 border: 1px solid #334155;
@@ -132,7 +136,7 @@
                 border-bottom: 1px solid #1e293b;
                 padding-bottom: 8px;
             }
-            .vcom-ai-field { margin-bottom: 12px; }
+            .vcom-ai-field { margin-bottom: 10px; }
             .vcom-ai-field label {
                 display: block;
                 margin-bottom: 4px;
@@ -141,7 +145,7 @@
             }
             .vcom-ai-input, .vcom-ai-select {
                 width: 100%;
-                padding: 8px;
+                padding: 7px;
                 background: #1e293b;
                 border: 1px solid #475569;
                 color: #fff;
@@ -149,6 +153,7 @@
                 box-sizing: border-box;
                 font-size: 12px;
             }
+            .vcom-ai-row { display: flex; gap: 6px; align-items: center; }
             .vcom-ai-status {
                 margin-top: 8px;
                 padding: 6px 8px;
@@ -175,103 +180,200 @@
                 color: #38bdf8;
             }
             .vcom-ai-btn:hover { opacity: 0.9; }
+            #vcom-model-search-modal {
+                position: fixed;
+                top: 50%; left: 50%; transform: translate(-50%, -50%);
+                z-index: 1000000;
+                width: 400px; max-height: 80vh;
+                background: #0f172a; border: 2px solid #38bdf8; border-radius: 12px;
+                padding: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+                display: none; flex-direction: column; color: #fff;
+            }
+            #vcom-model-search-modal.open { display: flex; }
+            #vcom-model-list { overflow-y: auto; max-height: 300px; margin-top: 8px; border: 1px solid #334155; border-radius: 6px; }
+            .vcom-model-item { padding: 8px; border-bottom: 1px solid #1e293b; cursor: pointer; font-size: 12px; }
+            .vcom-model-item:hover { background: #1e293b; color: #38bdf8; }
         `;
         document.head.appendChild(style);
 
         const toggleBtn = document.createElement('button');
         toggleBtn.id = 'vcom-ai-toggle';
-        toggleBtn.title = 'Toggle Gemini Solver Settings (Alt + G)';
+        toggleBtn.title = 'Toggle Solver Settings (Alt + G)';
         toggleBtn.innerText = '🧠';
-
-        const modelOptionsHTML = AVAILABLE_MODELS.map(
-            m => `<option value="${m.id}" ${config.model === m.id ? 'selected' : ''}>${m.label}</option>`
-        ).join('');
 
         const panel = document.createElement('div');
         panel.id = 'vcom-ai-panel';
         panel.classList.add('open');
-        panel.innerHTML = `
-            <div class="vcom-ai-header">
-                <span>Gemini Vocab Solver v1.4</span>
-                <span style="font-size: 11px; color: #64748b;">Alt+G</span>
-            </div>
-            <div class="vcom-ai-field">
-                <label for="vcom-api-key">Gemini API Key</label>
-                <input type="password" id="vcom-api-key" class="vcom-ai-input" placeholder="AIzaSy..." value="${config.apiKey}">
-            </div>
-            <div class="vcom-ai-field">
-                <label for="vcom-model">Gemini Model</label>
-                <select id="vcom-model" class="vcom-ai-select">
-                    ${modelOptionsHTML}
-                </select>
-            </div>
-            <div class="vcom-ai-field">
-                <label for="vcom-mode">Operating Mode</label>
-                <select id="vcom-mode" class="vcom-ai-select">
-                    <option value="highlight" ${config.mode === 'highlight' ? 'selected' : ''}>Highlight Only</option>
-                    <option value="auto" ${config.mode === 'auto' ? 'selected' : ''}>Auto-Answer</option>
-                </select>
-            </div>
-            <div class="vcom-ai-status">
-                <span id="vcom-cache-count">Cached: ${Object.keys(config.cache).length}</span>
-                <div>
-                    <button id="vcom-copy-debug" class="vcom-ai-btn secondary" title="Copy logs & DOM snapshot to clipboard">Copy Logs</button>
-                    <button id="vcom-clear-cache" class="vcom-ai-btn">Clear Cache</button>
+
+        function renderPanelBody() {
+            const isGemini = config.provider === 'gemini';
+            const modelOptions = isGemini
+                ? GEMINI_MODELS.map(m => `<option value="${m.id}" ${config.model === m.id ? 'selected' : ''}>${m.label}</option>`).join('')
+                : `<option value="${config.orModel}" selected>${config.orModel}</option>`;
+
+            panel.innerHTML = `
+                <div class="vcom-ai-header">
+                    <span>AI Vocab Solver v1.6</span>
+                    <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
-            </div>
-            <div id="vcom-ai-log" style="margin-top:8px; color:#38bdf8; font-size:11px; min-height:16px; word-break:break-word;">Ready.</div>
+                <div class="vcom-ai-field">
+                    <label for="vcom-provider">Provider</label>
+                    <select id="vcom-provider" class="vcom-ai-select">
+                        <option value="gemini" ${isGemini ? 'selected' : ''}>Google Gemini API</option>
+                        <option value="openrouter" ${!isGemini ? 'selected' : ''}>OpenRouter</option>
+                    </select>
+                </div>
+                <div class="vcom-ai-field">
+                    <label for="vcom-api-key">${isGemini ? 'Gemini API Key' : 'OpenRouter API Key'}</label>
+                    <input type="password" id="vcom-api-key" class="vcom-ai-input" placeholder="${isGemini ? 'AIzaSy...' : 'sk-or-v1-...'}" value="${config.apiKey}">
+                </div>
+                <div class="vcom-ai-field">
+                    <label for="vcom-model">Model</label>
+                    <div class="vcom-ai-row">
+                        <select id="vcom-model" class="vcom-ai-select">
+                            ${modelOptions}
+                        </select>
+                        ${!isGemini ? '<button id="vcom-search-models-btn" class="vcom-ai-btn secondary" style="white-space:nowrap;">Search</button>' : ''}
+                    </div>
+                </div>
+                <div class="vcom-ai-field">
+                    <label for="vcom-mode">Operating Mode</label>
+                    <select id="vcom-mode" class="vcom-ai-select">
+                        <option value="highlight" ${config.mode === 'highlight' ? 'selected' : ''}>Highlight Only</option>
+                        <option value="auto" ${config.mode === 'auto' ? 'selected' : ''}>Auto-Answer</option>
+                    </select>
+                </div>
+                <div class="vcom-ai-status">
+                    <span id="vcom-cache-count">Cached: ${Object.keys(config.cache).length}</span>
+                    <div>
+                        <button id="vcom-copy-debug" class="vcom-ai-btn secondary" title="Copy logs & DOM">Logs</button>
+                        <button id="vcom-clear-cache" class="vcom-ai-btn">Clear Cache</button>
+                    </div>
+                </div>
+                <div id="vcom-ai-log" style="margin-top:8px; color:#38bdf8; font-size:11px; min-height:16px; word-break:break-word;">Ready.</div>
+            `;
+            attachPanelListeners();
+        }
+
+        const modal = document.createElement('div');
+        modal.id = 'vcom-model-search-modal';
+        modal.innerHTML = `
+            <div style="font-weight:700; font-size:14px; margin-bottom:8px; color:#38bdf8;">Search OpenRouter Models</div>
+            <input type="text" id="vcom-model-filter" class="vcom-ai-input" placeholder="Type to filter (e.g., deepseek, claude, free)...">
+            <div id="vcom-model-list"></div>
+            <button id="vcom-close-modal" class="vcom-ai-btn secondary" style="margin-top:10px; width:100%;">Close</button>
         `;
 
         document.body.appendChild(toggleBtn);
         document.body.appendChild(panel);
+        document.body.appendChild(modal);
+
+        function attachPanelListeners() {
+            document.getElementById('vcom-provider').addEventListener('change', (e) => {
+                config.provider = e.target.value;
+                localStorage.setItem(STORAGE_KEYS.PROVIDER, config.provider);
+                renderPanelBody();
+                lastSolvedSignature = '';
+                checkAndSolve();
+            });
+
+            document.getElementById('vcom-api-key').addEventListener('input', (e) => {
+                config.apiKey = e.target.value.trim();
+                localStorage.setItem(STORAGE_KEYS.API_KEY, config.apiKey);
+                setStatus('API Key saved.');
+                lastSolvedSignature = '';
+                checkAndSolve();
+            });
+
+            document.getElementById('vcom-model').addEventListener('change', (e) => {
+                const val = e.target.value;
+                if (config.provider === 'gemini') {
+                    config.model = val;
+                    localStorage.setItem(STORAGE_KEYS.MODEL, config.model);
+                } else {
+                    config.orModel = val;
+                    localStorage.setItem(STORAGE_KEYS.OR_MODEL, config.orModel);
+                }
+                setStatus(`Model: ${val}`);
+                lastSolvedSignature = '';
+                checkAndSolve();
+            });
+
+            const searchBtn = document.getElementById('vcom-search-models-btn');
+            if (searchBtn) {
+                searchBtn.addEventListener('click', async () => {
+                    modal.classList.add('open');
+                    const listEl = document.getElementById('vcom-model-list');
+                    listEl.innerHTML = '<div style="padding:10px; color:#94a3b8;">Loading OpenRouter models...</div>';
+                    try {
+                        const res = await fetch('https://openrouter.ai/api/v1/models');
+                        const data = await res.json();
+                        window._orModelsCache = data.data || [];
+                        renderModelList(window._orModelsCache);
+                    } catch (err) {
+                        listEl.innerHTML = `<div style="padding:10px; color:#ef4444;">Failed to load models: ${err.message}</div>`;
+                    }
+                });
+            }
+
+            document.getElementById('vcom-mode').addEventListener('change', (e) => {
+                config.mode = e.target.value;
+                localStorage.setItem(STORAGE_KEYS.MODE, config.mode);
+                setStatus(`Mode: ${config.mode}`);
+                lastSolvedSignature = '';
+                checkAndSolve();
+            });
+
+            document.getElementById('vcom-clear-cache').addEventListener('click', () => {
+                config.cache = {};
+                localStorage.removeItem(STORAGE_KEYS.CACHE);
+                updateCacheCountUI();
+                setStatus('Cache cleared.');
+            });
+
+            document.getElementById('vcom-copy-debug').addEventListener('click', () => {
+                const activeQ = findActiveQuestionBox();
+                const domSnapshot = activeQ ? activeQ.outerHTML.slice(0, 1500) : 'No active question found';
+                const payload = `=== VCOM DEBUG LOGS ===\nURL: ${location.href}\n${debugLogs.join('\n')}\n\n=== DOM ===\n${domSnapshot}`;
+                navigator.clipboard.writeText(payload).then(() => setStatus('📋 Logs copied to clipboard!'));
+            });
+        }
+
+        document.getElementById('vcom-close-modal').addEventListener('click', () => modal.classList.remove('open'));
+        document.getElementById('vcom-model-filter').addEventListener('input', (e) => {
+            const query = e.target.value.toLowerCase();
+            const filtered = (window._orModelsCache || []).filter(m => m.id.toLowerCase().includes(query) || m.name.toLowerCase().includes(query));
+            renderModelList(filtered);
+        });
+
+        function renderModelList(models) {
+            const listEl = document.getElementById('vcom-model-list');
+            listEl.innerHTML = models.map(m => `
+                <div class="vcom-model-item" data-id="${m.id}">
+                    <b>${m.name}</b> <span style="color:#64748b; font-size:10px;">(${m.id})</span>
+                </div>
+            `).join('');
+
+            listEl.querySelectorAll('.vcom-model-item').forEach(el => {
+                el.addEventListener('click', () => {
+                    const chosenId = el.getAttribute('data-id');
+                    config.orModel = chosenId;
+                    localStorage.setItem(STORAGE_KEYS.OR_MODEL, chosenId);
+                    modal.classList.remove('open');
+                    renderPanelBody();
+                    setStatus(`Selected: ${chosenId}`);
+                });
+            });
+        }
+
+        renderPanelBody();
 
         toggleBtn.addEventListener('click', () => panel.classList.toggle('open'));
-
         document.addEventListener('keydown', (e) => {
             if (e.altKey && e.key.toLowerCase() === 'g') {
                 e.preventDefault();
                 panel.classList.toggle('open');
             }
-        });
-
-        document.getElementById('vcom-api-key').addEventListener('input', (e) => {
-            config.apiKey = e.target.value.trim();
-            localStorage.setItem(STORAGE_KEYS.API_KEY, config.apiKey);
-            setStatus('API Key saved.');
-            lastSolvedSignature = '';
-            checkAndSolve();
-        });
-
-        document.getElementById('vcom-model').addEventListener('change', (e) => {
-            config.model = e.target.value;
-            localStorage.setItem(STORAGE_KEYS.MODEL, config.model);
-            setStatus(`Model: ${config.model}`);
-            lastSolvedSignature = '';
-            checkAndSolve();
-        });
-
-        document.getElementById('vcom-mode').addEventListener('change', (e) => {
-            config.mode = e.target.value;
-            localStorage.setItem(STORAGE_KEYS.MODE, config.mode);
-            setStatus(`Mode: ${config.mode}`);
-            lastSolvedSignature = '';
-            checkAndSolve();
-        });
-
-        document.getElementById('vcom-clear-cache').addEventListener('click', () => {
-            config.cache = {};
-            localStorage.removeItem(STORAGE_KEYS.CACHE);
-            updateCacheCountUI();
-            setStatus('Cache cleared.');
-        });
-
-        document.getElementById('vcom-copy-debug').addEventListener('click', () => {
-            const activeQ = findActiveQuestionBox();
-            const domSnapshot = activeQ ? activeQ.outerHTML.slice(0, 1500) : 'No active question container found';
-            const payload = `=== VCOM DEBUG LOGS ===\nURL: ${location.href}\n${debugLogs.join('\n')}\n\n=== DOM SNAPSHOT ===\n${domSnapshot}`;
-            navigator.clipboard.writeText(payload).then(() => {
-                setStatus('📋 Debug logs & DOM copied to clipboard!');
-            });
         });
     }
 
@@ -287,27 +389,27 @@
     }
 
     // ==========================================
-    // 4. DOM & QUESTION DETECTION
+    // 4. DOM & QUESTION DETECTION (Supports Jam, Trainer, Practice)
     // ==========================================
     function isVisible(el) {
         if (!el) return false;
         const style = window.getComputedStyle(el);
-        if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) {
-            return false;
-        }
+        if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) return false;
         const rect = el.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
     }
 
     function findActiveQuestionBox() {
-        const questions = Array.from(document.querySelectorAll('.question, div[class*="question"]'));
+        // Expanded selectors to catch Jam, Trainer, and Practice layouts
+        const selectors = '.question, div[class*="question"], div[class*="jam"], .challenge, .prompt';
+        const questions = Array.from(document.querySelectorAll(selectors));
         for (let i = questions.length - 1; i >= 0; i--) {
             const q = questions[i];
-            if (isVisible(q) && (q.querySelector('.choices') || q.querySelector('.spelltheword') || q.querySelector('input[type="text"]'))) {
+            if (isVisible(q) && (q.querySelector('.choices') || q.querySelector('.spelltheword') || q.querySelector('input[type="text"]') || q.querySelectorAll('button, a[href="#"]').length >= 2)) {
                 return q;
             }
         }
-        const choicesList = Array.from(document.querySelectorAll('.choices'));
+        const choicesList = Array.from(document.querySelectorAll('.choices, ul[class*="choice"], div[class*="option"]'));
         for (let i = choicesList.length - 1; i >= 0; i--) {
             if (isVisible(choicesList[i]) && choicesList[i].parentElement) {
                 return choicesList[i].parentElement;
@@ -330,45 +432,65 @@
     }
 
     // ==========================================
-    // 5. GEMINI API INTEGRATION (TEXT-BASED MATCHING)
+    // 5. UNIFIED API CALL (GEMINI OR OPENROUTER)
     // ==========================================
-    async function askGeminiMultipleChoice(promptText, choicesTextArray) {
+    async function callAI(systemPrompt, userPrompt) {
         if (!config.apiKey) {
-            setStatus('⚠️ Missing Gemini API Key!');
+            setStatus('⚠️ Missing API Key!');
             return null;
         }
 
-        const formattedChoices = choicesTextArray.map(c => `- ${c}`).join('\n');
+        let endpoint, headers, body;
 
-        const systemInstruction =
-            "You are a precise Vocabulary.com question solver. " +
-            "Analyze the question prompt and the given multiple-choice options. " +
-            "Respond with ONLY the exact text of the correct option from the list. " +
-            "Do not include bullet points, numbers, quotes, or any explanation.";
-
-        const userPrompt = `Question:\n${promptText}\n\nOptions:\n${formattedChoices}`;
-
-        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent?key=${encodeURIComponent(config.apiKey)}`;
-
-        const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                systemInstruction: { parts: [{ text: systemInstruction }] },
+        if (config.provider === 'gemini') {
+            endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent?key=${encodeURIComponent(config.apiKey)}`;
+            headers = { 'Content-Type': 'application/json' };
+            body = JSON.stringify({
+                systemInstruction: { parts: [{ text: systemPrompt }] },
                 contents: [{ parts: [{ text: userPrompt }] }],
                 generationConfig: { temperature: 0.0, maxOutputTokens: 60 }
-            })
-        });
-
-        if (!response.ok) {
-            const errText = await response.text().catch(() => '');
-            logDebug(`HTTP ${response.status}`, errText.slice(0, 200));
-            throw new Error(`API Error ${response.status} (${config.model})`);
+            });
+        } else {
+            endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+            headers = {
+                'Authorization': `Bearer ${config.apiKey}`,
+                'Content-Type': 'application/json',
+                'HTTP-Referer': 'https://vocabulary.com',
+                'X-Title': 'Vocab AI Solver'
+            };
+            body = JSON.stringify({
+                model: config.orModel,
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: userPrompt }
+                ],
+                temperature: 0.0,
+                max_tokens: 60
+            });
         }
 
-        const data = await response.json();
-        const rawReply = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
-        logDebug('Gemini raw reply', rawReply);
+        const res = await fetch(endpoint, { method: 'POST', headers, body });
+        if (!res.ok) {
+            const errText = await res.text().catch(() => '');
+            logDebug(`HTTP ${res.status}`, errText.slice(0, 200));
+            throw new Error(`API Error ${res.status}`);
+        }
+
+        const data = await res.json();
+        if (config.provider === 'gemini') {
+            return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+        } else {
+            return data?.choices?.[0]?.message?.content?.trim() || '';
+        }
+    }
+
+    async function askAIMultipleChoice(promptText, choicesTextArray) {
+        const formattedChoices = choicesTextArray.map(c => `- ${c}`).join('\n');
+        const systemInstruction = "You are a precise Vocabulary.com question solver. Analyze the question prompt and choices. Respond with ONLY the exact text of the correct option from the list. Do not include bullet points, numbers, or quotes.";
+        const userPrompt = `Question:\n${promptText}\n\nOptions:\n${formattedChoices}`;
+
+        const rawReply = await callAI(systemInstruction, userPrompt);
+        logDebug('AI raw reply', rawReply);
 
         const matched = choicesTextArray.find(c => {
             const cleanC = c.toLowerCase().trim();
@@ -379,38 +501,17 @@
         return matched || rawReply;
     }
 
-    async function askGeminiSpelling(promptContext) {
-        if (!config.apiKey) {
-            setStatus('⚠️ Missing Gemini API Key!');
-            return null;
-        }
-
-        const systemInstruction =
-            "You are a Vocabulary.com spelling solver. Given the definition or sentence context, " +
-            "return ONLY the exact single vocabulary word being asked to spell. No punctuation, quotes, or explanation.";
-
-        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent?key=${encodeURIComponent(config.apiKey)}`;
-
-        const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                systemInstruction: { parts: [{ text: systemInstruction }] },
-                contents: [{ parts: [{ text: promptContext }] }],
-                generationConfig: { temperature: 0.0, maxOutputTokens: 20 }
-            })
-        });
-
-        if (!response.ok) throw new Error(`API Error ${response.status} (${config.model})`);
-        const data = await response.json();
-        return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim().replace(/[^a-zA-Z-]/g, '') || null;
+    async function askAISpelling(promptContext) {
+        const systemInstruction = "You are a Vocabulary.com spelling solver. Given the definition or sentence context, return ONLY the exact single vocabulary word being asked to spell. No punctuation, quotes, or explanation.";
+        const rawReply = await callAI(systemInstruction, promptContext);
+        return rawReply ? rawReply.replace(/[^a-zA-Z-]/g, '') : null;
     }
 
     // ==========================================
     // 6. QUESTION SOLVING PIPELINE
     // ==========================================
     function triggerHumanDelay(callback) {
-        const delay = Math.floor(Math.random() * 301) + 400; // 400-700ms
+        const delay = Math.floor(Math.random() * 301) + 400;
         setTimeout(callback, delay);
     }
 
@@ -421,7 +522,7 @@
         const nxtBtn = candidates.find(el => {
             if (!isVisible(el)) return false;
             const txt = el.innerText.trim().toLowerCase();
-            return el.classList.contains('active') || txt.includes('try the next one') || txt === 'next' || txt.includes('next question');
+            return el.classList.contains('active') || txt.includes('try the next one') || txt === 'next' || txt.includes('next question') || txt.includes('continue');
         });
 
         if (nxtBtn && !nxtBtn.dataset.autoClicked) {
@@ -442,9 +543,8 @@
         }
 
         const choicesText = choiceElements.map(getCleanChoiceText);
-
         const clone = questBox.cloneNode(true);
-        const cloneChoices = clone.querySelector('.choices');
+        const cloneChoices = clone.querySelector('.choices') || clone.querySelector('ul[class*="choice"]');
         if (cloneChoices) cloneChoices.remove();
         const fullPrompt = clone.innerText.trim();
 
@@ -459,15 +559,16 @@
         if (winningAnswerText) {
             setStatus('⚡ Solved from local cache');
         } else {
-            setStatus(`🤖 Asking ${config.model}...`);
+            const activeModelName = config.provider === 'gemini' ? config.model : config.orModel;
+            setStatus(`🤖 Asking ${activeModelName}...`);
             try {
-                winningAnswerText = await askGeminiMultipleChoice(fullPrompt, choicesText);
+                winningAnswerText = await askAIMultipleChoice(fullPrompt, choicesText);
                 if (winningAnswerText) {
                     saveCache(cacheKey, winningAnswerText);
                     setStatus(`✅ Answer found`);
                 }
             } catch (err) {
-                console.error('[Vocab Gemini Solver]', err);
+                console.error('[VCOM-AI]', err);
                 setStatus(`❌ ${err.message}`);
                 return;
             }
@@ -523,9 +624,10 @@
         let wordAnswer = config.cache[cacheKey];
 
         if (!wordAnswer) {
-            setStatus(`🤖 Spelling via ${config.model}...`);
+            const activeModelName = config.provider === 'gemini' ? config.model : config.orModel;
+            setStatus(`🤖 Spelling via ${activeModelName}...`);
             try {
-                wordAnswer = await askGeminiSpelling(contextText);
+                wordAnswer = await askAISpelling(contextText);
                 if (wordAnswer) saveCache(cacheKey, wordAnswer);
             } catch (err) {
                 setStatus(`❌ ${err.message}`);
@@ -566,7 +668,7 @@
         const questBox = findActiveQuestionBox();
         if (!questBox) return;
 
-        const choicesContainer = questBox.querySelector('.choices');
+        const choicesContainer = questBox.querySelector('.choices') || questBox.querySelector('ul[class*="choice"]');
         const spellInput = questBox.querySelector('.spelltheword, input[type="text"]');
 
         isProcessing = true;
