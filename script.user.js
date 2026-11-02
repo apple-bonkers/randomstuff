@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      1.8.0
-// @description  Solves Vocabulary.com with auto-removal of the "Try not to rush!" lockout screen, text-matching, auto-correction, and caching.
+// @version      1.8.1
+// @description  Solves Vocabulary.com with clean caching, blocker removal, and robust text-matching.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -71,10 +71,9 @@
     }
 
     // ==========================================
-    // 2. AUTO-REMOVE "TRY NOT TO RUSH!" LOCKOUT
+    // 2. AUTO-REMOVE LOCKOUT / BLOCKER
     // ==========================================
     function removeBlocker() {
-        // Targets both standard .blocker elements and Vocabulary.com's .lockout-background screen
         const blockers = document.querySelectorAll('.blocker, .lockout-background, div[class*="lockout"]');
         blockers.forEach(b => {
             b.remove();
@@ -154,7 +153,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v1.8.0</span>
+                    <span>AI Vocab Solver v1.8.1</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
@@ -458,7 +457,7 @@
     }
 
     // ==========================================
-    // 6. QUESTION SOLVING & AUTO-CORRECTION PIPELINE
+    // 6. QUESTION SOLVING PIPELINE (NO POISONED CACHE)
     // ==========================================
     function triggerHumanDelay(callback) {
         const delay = Math.floor(Math.random() * 301) + 400;
@@ -497,12 +496,6 @@
         if (!fullPrompt) return;
 
         const cacheKey = generateCacheKey(fullPrompt, choicesText);
-
-        const correctEl = choiceElements.find(el => el.classList.contains('correct'));
-        if (correctEl) {
-            saveCache(cacheKey, getCleanChoiceText(correctEl));
-            return;
-        }
 
         if (cacheKey === lastSolvedSignature) return;
         lastSolvedSignature = cacheKey;
@@ -547,20 +540,6 @@
                 });
             }
         }
-
-        choiceElements.forEach(el => {
-            if (el.dataset.listenerAttached) return;
-            el.dataset.listenerAttached = 'true';
-            el.addEventListener('click', () => {
-                setTimeout(() => {
-                    const actualCorrect = choiceElements.find(c => c.classList.contains('correct'));
-                    if (actualCorrect) {
-                        saveCache(cacheKey, getCleanChoiceText(actualCorrect));
-                        setStatus('🧠 Cached correct answer from result');
-                    }
-                }, 400);
-            });
-        });
     }
 
     async function handleSpelling(questBox) {
