@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      1.9.0
-// @description  Solves Vocabulary.com text, spelling, and picture-choice questions using multimodal AI models (Gemini / OpenRouter).
+// @version      1.9.1
+// @description  Solves Vocabulary.com with enhanced prompt engineering for synonym and definition accuracy, auto-removal of blockers, and caching.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -41,7 +41,7 @@
         provider: localStorage.getItem(STORAGE_KEYS.PROVIDER) || 'gemini',
         apiKey: localStorage.getItem(STORAGE_KEYS.API_KEY) || '',
         model: localStorage.getItem(STORAGE_KEYS.MODEL) || 'gemini-flash-lite-latest',
-        orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'google/gemini-3.5-flash-lite',
+        orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'deepseek/deepseek-chat',
         mode: localStorage.getItem(STORAGE_KEYS.MODE) || 'highlight',
         cache: JSON.parse(localStorage.getItem(STORAGE_KEYS.CACHE) || '{}')
     };
@@ -152,7 +152,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v1.9.0</span>
+                    <span>AI Vocab Solver v1.9.1</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
@@ -327,7 +327,7 @@
     }
 
     // ==========================================
-    // 4. DOM & QUESTION DETECTION (TEXT & PICTURES)
+    // 4. DOM & QUESTION DETECTION
     // ==========================================
     function isVisible(el) {
         if (!el) return false;
@@ -368,10 +368,8 @@
         }
     }
 
-    // Helper: Canvas screenshot capture for picture-choice questions
     async function captureElementAsBase64(element) {
         try {
-            // Load html2canvas dynamically if not present
             if (!window.html2canvas) {
                 await new Promise((resolve, reject) => {
                     const script = document.createElement('script');
@@ -465,10 +463,10 @@
         let systemInstruction, userPrompt;
 
         if (isPictureChoice) {
-            systemInstruction = "You are a precise Vocabulary.com picture-choice question solver. Examine the attached image which contains 4 numbered picture choices (arranged in a grid or list) and a vocabulary word prompt. Identify which picture quadrant or option best illustrates the vocabulary word. Respond with ONLY the exact text label or image description corresponding to the correct choice, or if no text is present, describe the correct choice concisely. Do not pick the question prompt.";
-            userPrompt = `Question Prompt: ${promptText}\n\nChoose the correct picture option from the image. Respond with ONLY the matching option text.`;
+            systemInstruction = "You are an expert Vocabulary.com picture-choice question solver. Examine the attached image showing a word prompt and 4 picture options. Select the correct picture option. Respond with ONLY the exact text label or description of the correct choice.";
+            userPrompt = `Word/Prompt: ${promptText}\n\nSelect the correct option from the image.`;
         } else {
-            systemInstruction = "You are a precise Vocabulary.com question solver. Analyze the question prompt and the available choices. Respond with ONLY the exact full text of the correct choice from the list. Do not summarize, do not output partial phrases, and do not include bullet points, quotes, or punctuation.";
+            systemInstruction = "You are an expert Vocabulary.com lexical assistant. You specialize in accurate synonym matching and definition resolution. Analyze the prompt and options carefully. Select the option that is a true dictionary synonym or precise definition match. Respond with ONLY the exact text of the correct choice. No punctuation, bullet points, or quotes.";
             userPrompt = `Question / Prompt:\n${promptText}\n\nAvailable Choices:\n${choicesTextArray.map(c => `- ${c}`).join('\n')}`;
         }
 
@@ -478,17 +476,15 @@
         if (!rawReply) return null;
         const cleanedReply = rawReply.replace(/^["']|["']$/g, '').trim();
 
-        // Prevent model from accidentally returning the question prompt itself
         if (promptText.toLowerCase().includes(cleanedReply.toLowerCase())) {
             logDebug('AI mistakenly returned question prompt. Rejecting.');
             return null;
         }
 
-        const matched = choicesTextArray.find(c => {
-            const cleanC = c.toLowerCase().trim();
-            const cleanR = cleanedReply.toLowerCase().trim();
-            return cleanC === cleanR || cleanC.includes(cleanR) || cleanR.includes(cleanC);
-        });
+        let matched = choicesTextArray.find(c => c.toLowerCase().trim() === cleanedReply.toLowerCase());
+        if (!matched && cleanedReply.length >= 3) {
+            matched = choicesTextArray.find(c => c.toLowerCase().includes(cleanedReply.toLowerCase()));
+        }
 
         return matched || null;
     }
@@ -528,17 +524,12 @@
 
     async function handleMultipleChoice(questBox, choicesContainer) {
         const choiceElements = Array.from(choicesContainer.children).filter(el => el.innerText.trim().length > 0);
-        
-        // Check if this is a picture choice question (contains images or grid of picture options)
         const isPictureChoice = questBox.querySelector('img') !== null && choiceElements.length === 0;
         let pictureChoices = [];
 
         if (isPictureChoice) {
-            // For picture choices, clickable elements might be image containers or grid items
             const imgBoxes = Array.from(questBox.querySelectorAll('.choice, div[class*="image"], div[class*="picture"], a'));
-            if (imgBoxes.length > 0) {
-                pictureChoices = imgBoxes;
-            }
+            if (imgBoxes.length > 0) pictureChoices = imgBoxes;
         }
 
         const effectiveChoices = isPictureChoice ? pictureChoices : choiceElements;
