@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      1.9.1
-// @description  Solves Vocabulary.com with enhanced prompt engineering for synonym and definition accuracy, auto-removal of blockers, and caching.
+// @version      1.9.2
+// @description  Solves Vocabulary.com with aggressive continuous lockout removal, multimodal image support, and caching.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -41,7 +41,7 @@
         provider: localStorage.getItem(STORAGE_KEYS.PROVIDER) || 'gemini',
         apiKey: localStorage.getItem(STORAGE_KEYS.API_KEY) || '',
         model: localStorage.getItem(STORAGE_KEYS.MODEL) || 'gemini-flash-lite-latest',
-        orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'deepseek/deepseek-chat',
+        orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'google/gemini-3.5-flash-lite',
         mode: localStorage.getItem(STORAGE_KEYS.MODE) || 'highlight',
         cache: JSON.parse(localStorage.getItem(STORAGE_KEYS.CACHE) || '{}')
     };
@@ -71,12 +71,15 @@
     }
 
     // ==========================================
-    // 2. AUTO-REMOVE LOCKOUT / BLOCKER
+    // 2. AGGRESSIVE LOCKOUT / BLOCKER REMOVER
     // ==========================================
     function removeBlocker() {
-        const blockers = document.querySelectorAll('.blocker, .lockout-background, div[class*="lockout"]');
+        const selectors = '.blocker, .lockout-background, div[class*="lockout"], div[class*="rush"]';
+        const blockers = document.querySelectorAll(selectors);
         blockers.forEach(b => {
             b.remove();
+            logDebug('Lockout screen forcibly removed.');
+            window.dispatchEvent(new Event('resize'));
         });
     }
 
@@ -152,7 +155,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v1.9.1</span>
+                    <span>AI Vocab Solver v1.9.2</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
@@ -388,7 +391,7 @@
     }
 
     // ==========================================
-    // 5. UNIFIED API CALL (TEXT + MULTIMODAL IMAGES)
+    // 5. UNIFIED API CALL
     // ==========================================
     async function callAI(systemPrompt, userPrompt, base64Image = null) {
         if (!config.apiKey) {
@@ -466,7 +469,7 @@
             systemInstruction = "You are an expert Vocabulary.com picture-choice question solver. Examine the attached image showing a word prompt and 4 picture options. Select the correct picture option. Respond with ONLY the exact text label or description of the correct choice.";
             userPrompt = `Word/Prompt: ${promptText}\n\nSelect the correct option from the image.`;
         } else {
-            systemInstruction = "You are an expert Vocabulary.com lexical assistant. You specialize in accurate synonym matching and definition resolution. Analyze the prompt and options carefully. Select the option that is a true dictionary synonym or precise definition match. Respond with ONLY the exact text of the correct choice. No punctuation, bullet points, or quotes.";
+            systemInstruction = "You are an expert Vocabulary.com lexical assistant. Analyze the prompt and options carefully. Select the option that is a true dictionary synonym or precise definition match. Respond with ONLY the exact text of the correct choice. No punctuation, bullet points, or quotes.";
             userPrompt = `Question / Prompt:\n${promptText}\n\nAvailable Choices:\n${choicesTextArray.map(c => `- ${c}`).join('\n')}`;
         }
 
@@ -686,7 +689,12 @@
             attributeFilter: ['class', 'style']
         });
 
-        setInterval(checkAndSolve, 500);
+        // Continuous sweeper to annihilate the lockout screen instantly
+        setInterval(() => {
+            removeBlocker();
+            checkAndSolve();
+        }, 300);
+
         checkAndSolve();
     }
 
