@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      1.9.2
-// @description  Solves Vocabulary.com with aggressive continuous lockout removal, multimodal image support, and caching.
+// @version      1.9.3
+// @description  Solves Vocabulary.com with aggressive rush-screen removal, multimodal image support, spelling auto-answer, and caching.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -71,14 +71,15 @@
     }
 
     // ==========================================
-    // 2. AGGRESSIVE LOCKOUT / BLOCKER REMOVER
+    // 2. AGGRESSIVE LOCKOUT / RUSH SCREEN REMOVER
     // ==========================================
     function removeBlocker() {
-        const selectors = '.blocker, .lockout-background, div[class*="lockout"], div[class*="rush"]';
+        const selectors = '.blocker, .lockout-background, div[class*="lockout"], div[class*="rush"], .lockout-icon';
         const blockers = document.querySelectorAll(selectors);
         blockers.forEach(b => {
-            b.remove();
-            logDebug('Lockout screen forcibly removed.');
+            const container = b.closest('.lockout-background') || b.closest('.box-question') || b;
+            container.remove();
+            logDebug('Lockout/Rush screen obliterated.');
             window.dispatchEvent(new Event('resize'));
         });
     }
@@ -155,7 +156,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v1.9.2</span>
+                    <span>AI Vocab Solver v1.9.3</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
@@ -689,11 +690,11 @@
             attributeFilter: ['class', 'style']
         });
 
-        // Continuous sweeper to annihilate the lockout screen instantly
+        // Continuous aggressive sweeper to annihilate the lockout screen instantly
         setInterval(() => {
             removeBlocker();
             checkAndSolve();
-        }, 300);
+        }, 200);
 
         checkAndSolve();
     }
