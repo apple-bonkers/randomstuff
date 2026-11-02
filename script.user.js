@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      1.8.1
-// @description  Solves Vocabulary.com with clean caching, blocker removal, and robust text-matching.
+// @version      1.8.2
+// @description  Solves Vocabulary.com with strict full-phrase matching, preventing cut-off partial choice selections.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -77,7 +77,6 @@
         const blockers = document.querySelectorAll('.blocker, .lockout-background, div[class*="lockout"]');
         blockers.forEach(b => {
             b.remove();
-            logDebug('Lockout / Blocker screen removed.');
         });
     }
 
@@ -153,7 +152,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v1.8.1</span>
+                    <span>AI Vocab Solver v1.8.2</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
@@ -386,7 +385,7 @@
             body = JSON.stringify({
                 systemInstruction: { parts: [{ text: systemPrompt }] },
                 contents: [{ parts: [{ text: userPrompt }] }],
-                generationConfig: { temperature: 0.0, maxOutputTokens: 60 }
+                generationConfig: { temperature: 0.0, maxOutputTokens: 100 }
             });
         } else {
             endpoint = 'https://openrouter.ai/api/v1/chat/completions';
@@ -403,7 +402,7 @@
                     { role: 'user', content: userPrompt }
                 ],
                 temperature: 0.0,
-                max_tokens: 300
+                max_tokens: 500
             });
         }
 
@@ -431,7 +430,7 @@
 
     async function askAIMultipleChoice(promptText, choicesTextArray) {
         const formattedChoices = choicesTextArray.map(c => `- ${c}`).join('\n');
-        const systemInstruction = "You are a precise Vocabulary.com question solver. Analyze the question prompt and the available choices. Respond with ONLY the exact text of the correct choice from the list. Do not include bullet points, quotes, explanations, or punctuation.";
+        const systemInstruction = "You are a precise Vocabulary.com question solver. Analyze the question prompt and the available choices. Respond with ONLY the exact full text of the correct choice from the list. Do not summarize, do not output partial phrases, and do not include bullet points, quotes, or punctuation.";
         const userPrompt = `Question / Prompt:\n${promptText}\n\nAvailable Choices:\n${formattedChoices}`;
 
         const rawReply = await callAI(systemInstruction, userPrompt);
@@ -441,13 +440,15 @@
 
         const cleanedReply = rawReply.replace(/^["']|["']$/g, '').trim();
 
-        const matched = choicesTextArray.find(c => {
-            const cleanC = c.toLowerCase().trim();
-            const cleanR = cleanedReply.toLowerCase().trim();
-            return cleanC === cleanR || cleanC.includes(cleanR) || cleanR.includes(cleanC);
-        });
+        // 1. Exact match
+        let matched = choicesTextArray.find(c => c.toLowerCase().trim() === cleanedReply.toLowerCase());
 
-        return matched || choicesTextArray[0];
+        // 2. Strict Substring match (ensuring reply is at least 4 chars to prevent partial matches like "the")
+        if (!matched && cleanedReply.length >= 4) {
+            matched = choicesTextArray.find(c => c.toLowerCase().includes(cleanedReply.toLowerCase()));
+        }
+
+        return matched || null;
     }
 
     async function askAISpelling(promptContext) {
@@ -457,7 +458,7 @@
     }
 
     // ==========================================
-    // 6. QUESTION SOLVING PIPELINE (NO POISONED CACHE)
+    // 6. QUESTION SOLVING PIPELINE
     // ==========================================
     function triggerHumanDelay(callback) {
         const delay = Math.floor(Math.random() * 301) + 400;
