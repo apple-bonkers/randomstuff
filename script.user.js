@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      2.1.0
-// @description  Solves Vocabulary.com with live web search grounding (Gemini Google Search / OpenRouter Web), multi-image vision, and anti-lockout pacing.
+// @version      2.2.0
+// @description  Solves Vocabulary.com.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -46,7 +46,7 @@
         orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'deepseek/deepseek-chat',
         mode: localStorage.getItem(STORAGE_KEYS.MODE) || 'auto',
         speed: localStorage.getItem(STORAGE_KEYS.SPEED) || 'safe',
-        webSearch: localStorage.getItem(STORAGE_KEYS.WEB_SEARCH) !== 'false', // Enabled by default
+        webSearch: localStorage.getItem(STORAGE_KEYS.WEB_SEARCH) !== 'false',
         cache: JSON.parse(localStorage.getItem(STORAGE_KEYS.CACHE) || '{}')
     };
 
@@ -163,7 +163,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v2.1.0</span>
+                    <span>AI Vocab Solver v2.2.0</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
@@ -187,9 +187,9 @@
                     </div>
                 </div>
                 <div class="vcom-ai-field">
-                    <label for="vcom-web-search">Web Search Grounding</label>
+                    <label for="vcom-web-search">Live Search (vocabulary.com Grounding)</label>
                     <select id="vcom-web-search" class="vcom-ai-select">
-                        <option value="true" ${config.webSearch ? 'selected' : ''}>Enabled (Live Search Vocabulary.com)</option>
+                        <option value="true" ${config.webSearch ? 'selected' : ''}>Enabled (openrouter:web_search / Google Search)</option>
                         <option value="false" ${!config.webSearch ? 'selected' : ''}>Disabled (Model Memory Only)</option>
                     </select>
                 </div>
@@ -226,7 +226,7 @@
         modal.id = 'vcom-model-search-modal';
         modal.innerHTML = `
             <div style="font-weight:700; font-size:14px; margin-bottom:8px; color:#38bdf8;">Search OpenRouter Models</div>
-            <input type="text" id="vcom-model-filter" class="vcom-ai-input" placeholder="Type to filter (e.g. deepseek, gemini, flash)...">
+            <input type="text" id="vcom-model-filter" class="vcom-ai-input" placeholder="Type to filter (e.g. deepseek, llama, gemini)...">
             <div id="vcom-model-list"></div>
             <button id="vcom-close-modal" class="vcom-ai-btn secondary" style="margin-top:10px; width:100%;">Close</button>
         `;
@@ -420,7 +420,7 @@
     }
 
     // ==========================================
-    // 5. UNIFIED API CALL (WITH GOOGLE & OPENROUTER SEARCH)
+    // 5. UNIFIED API ENGINE (SERVER TOOLS INTEGRATION)
     // ==========================================
     function cleanAIReply(reply) {
         if (!reply || typeof reply !== 'string') return '';
@@ -438,7 +438,7 @@
         }
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 20000);
+        const timeoutId = setTimeout(() => controller.abort(), 25000);
 
         let endpoint, headers, body;
 
@@ -486,12 +486,21 @@
                         { role: 'user', content: userContent }
                     ],
                     temperature: 0.1,
-                    max_tokens: 400
+                    max_tokens: 450
                 };
 
-                // Live Web Search Plugin for OpenRouter
+                // Official OpenRouter Server Tool: openrouter:web_search
                 if (config.webSearch) {
-                    reqBody.plugins = [{ id: 'web', max_results: 3 }];
+                    reqBody.tools = [
+                        {
+                            type: 'openrouter:web_search',
+                            parameters: {
+                                engine: 'auto',
+                                max_results: 3,
+                                allowed_domains: ['vocabulary.com']
+                            }
+                        }
+                    ];
                 }
 
                 body = JSON.stringify(reqBody);
@@ -509,7 +518,6 @@
             const data = await res.json();
             let rawContent = '';
             if (config.provider === 'gemini') {
-                // Grounded search responses may be split across multiple parts
                 const parts = data?.candidates?.[0]?.content?.parts || [];
                 rawContent = parts.map(p => p.text || '').filter(Boolean).join('\n');
             } else {
@@ -537,13 +545,10 @@
     async function askAIMultipleChoice(promptText, choicesTextArray) {
         const formattedChoices = choicesTextArray.map((c, i) => `${i + 1}. ${c}`).join('\n');
         let systemInstruction = 
-            "You are an expert Vocabulary.com test solver. Select the single best answer choice for the vocabulary question.\n" +
+            "You are an expert Vocabulary.com solver. Select the single best answer choice.\n" +
+            "If unsure, search vocabulary.com to verify exact dictionary usage and citations.\n" +
             "Output ONLY the text or number of the correct option in this exact format:\n" +
             "ANSWER: <exact text of chosen option>";
-
-        if (config.webSearch) {
-            systemInstruction += "\nIf unsure about obscure definitions or citations, use web search for site:vocabulary.com to confirm.";
-        }
 
         const userPrompt = `Question Context / Prompt:\n${promptText}\n\nAvailable Options:\n${formattedChoices}`;
         const rawReply = await callAI(systemInstruction, userPrompt);
@@ -554,10 +559,8 @@
         const parsed = extractFinalAnswer(rawReply);
         logDebug('Parsed final answer', parsed);
 
-        // 1. Exact match
         let matched = choicesTextArray.find(c => c.toLowerCase().trim() === parsed.toLowerCase().trim());
 
-        // 2. Numbered index match (1, 2, 3, 4)
         if (!matched) {
             const numMatch = parsed.match(/^([1-4])\b/);
             if (numMatch) {
@@ -568,7 +571,6 @@
             }
         }
 
-        // 3. Substring match
         if (!matched && parsed.length >= 3) {
             matched = choicesTextArray.find(c => 
                 c.toLowerCase().includes(parsed.toLowerCase()) || 
@@ -576,7 +578,6 @@
             );
         }
 
-        // 4. Raw response fallback scan
         if (!matched) {
             const replyLower = rawReply.toLowerCase();
             for (const choice of choicesTextArray) {
@@ -595,15 +596,10 @@
             "You are an expert Vocabulary.com spelling solver.\n" +
             "You are given an example sentence with blanks (________) taken directly from Vocabulary.com.\n" +
             "Your task is to identify the exact academic headword being tested.\n" +
-            "Rules:\n" +
-            "1. Vocabulary.com tests formal academic, SAT, GRE, and literary vocabulary. Never guess basic colloquial words.\n" +
-            "2. Identify the target spelling as the primary dictionary headword / base lemma.\n";
-
-        if (config.webSearch) {
-            systemInstruction += "3. Use web search to search site:vocabulary.com for the exact sentence to retrieve the exact word tested.\n";
-        }
-
-        systemInstruction += "Output your final answer on the last line strictly in this format:\nANSWER: <single word>";
+            "Search vocabulary.com for this exact sentence to locate the word entry.\n" +
+            "The target spelling is always the primary dictionary headword / base lemma.\n" +
+            "Output your final answer on the last line strictly in this format:\n" +
+            "ANSWER: <single word>";
 
         const userPrompt = `Sentence / Definition:\n"${sentenceContext}"\n\nFind the target vocabulary headword:`;
         const rawReply = await callAI(systemInstruction, userPrompt);
@@ -645,7 +641,7 @@
         } else if (config.speed === 'fast') {
             return Math.floor(Math.random() * 1000) + 1500;
         } else {
-            return Math.floor(Math.random() * 1500) + 3200; // Safe: 3.2s - 4.7s
+            return Math.floor(Math.random() * 1500) + 3200;
         }
     }
 
@@ -863,7 +859,7 @@
 
     function startEngine() {
         injectUI();
-        logDebug('Vocab Solver Engine 2.1.0 started on ' + location.pathname);
+        logDebug('Vocab Solver Engine 2.2.0 started on ' + location.pathname);
 
         const observer = new MutationObserver(() => {
             checkAndSolve();
