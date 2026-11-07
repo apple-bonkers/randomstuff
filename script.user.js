@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      2.2.2
-// @description  Solves Vocabulary.com with instant Exa search strictly for spelling questions, pure LLM memory for multiple choice, and anti-lockout pacing.
+// @version      2.2.3
+// @description  Solves Vocabulary.com with capped Exa Instant search (max_uses: 1) + automatic memory fallback so spelling never times out.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -46,7 +46,7 @@
         orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'deepseek/deepseek-chat',
         mode: localStorage.getItem(STORAGE_KEYS.MODE) || 'auto',
         speed: localStorage.getItem(STORAGE_KEYS.SPEED) || 'safe',
-        spellSearch: localStorage.getItem(STORAGE_KEYS.SPELL_SEARCH) !== 'false', // Exa Instant for spelling only
+        spellSearch: localStorage.getItem(STORAGE_KEYS.SPELL_SEARCH) !== 'false',
         cache: JSON.parse(localStorage.getItem(STORAGE_KEYS.CACHE) || '{}')
     };
 
@@ -163,7 +163,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v2.2.2</span>
+                    <span>AI Vocab Solver v2.2.3</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
@@ -189,7 +189,7 @@
                 <div class="vcom-ai-field">
                     <label for="vcom-spell-search">Exa Instant Search (Spelling Questions Only)</label>
                     <select id="vcom-spell-search" class="vcom-ai-select">
-                        <option value="true" ${config.spellSearch ? 'selected' : ''}>Enabled (Exa ~250ms / Google Grounding)</option>
+                        <option value="true" ${config.spellSearch ? 'selected' : ''}>Enabled (Exa Instant + Auto-Fallback)</option>
                         <option value="false" ${!config.spellSearch ? 'selected' : ''}>Disabled (Fast Pure Model Memory)</option>
                     </select>
                 </div>
@@ -420,7 +420,7 @@
     }
 
     // ==========================================
-    // 5. UNIFIED API ENGINE (EXA INSTANT STRICTLY FOR SPELLING)
+    // 5. UNIFIED API ENGINE (CAPPED EXA + AUTO-FALLBACK)
     // ==========================================
     function cleanAIReply(reply) {
         if (!reply || typeof reply !== 'string') return '';
@@ -431,14 +431,14 @@
         return stripped;
     }
 
-    async function callAI(systemPrompt, userPrompt, imageUrls = [], enableSpellingSearch = false) {
+    async function callAI(systemPrompt, userPrompt, imageUrls = [], useSearch = false, timeoutMs = 14000) {
         if (!config.apiKey) {
             setStatus('⚠️ Missing API Key!');
             return null;
         }
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 18000);
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
         let endpoint, headers, body;
 
@@ -451,11 +451,10 @@
                 const reqBody = {
                     systemInstruction: { parts: [{ text: systemPrompt }] },
                     contents: [{ parts: contentParts }],
-                    generationConfig: { temperature: 0.1, maxOutputTokens: 350 }
+                    generationConfig: { temperature: 0.1, maxOutputTokens: 300 }
                 };
 
-                // Gemini Native Google Search ONLY for spelling
-                if (enableSpellingSearch && config.spellSearch) {
+                if (useSearch) {
                     reqBody.tools = [{ googleSearch: {} }];
                 }
 
@@ -486,18 +485,21 @@
                         { role: 'user', content: userContent }
                     ],
                     temperature: 0.1,
-                    max_tokens: 350
+                    max_tokens: 300
                 };
 
-                // Exa Instant search strictly on vocabulary.com ONLY for spelling
-                if (enableSpellingSearch && config.spellSearch) {
+                // Tightly capped Exa Instant search: 1 search max, small character budget
+                if (useSearch) {
+                    reqBody.max_tool_calls = 1;
                     reqBody.tools = [
                         {
                             type: 'openrouter:web_search',
                             parameters: {
                                 engine: 'exa',
-                                mode: 'instant', // ~250ms latency
-                                max_results: 3,
+                                mode: 'instant',
+                                max_uses: 1,
+                                max_results: 2,
+                                max_characters: 1200,
                                 allowed_domains: ['vocabulary.com']
                             }
                         }
@@ -543,7 +545,6 @@
         return lines.length > 0 ? lines[lines.length - 1].replace(/^["'*\s]+|["'*\s]+$/g, '').trim() : '';
     }
 
-    // MULTIPLE CHOICE: Pure fast LLM memory (0 web search overhead)
     async function askAIMultipleChoice(promptText, choicesTextArray) {
         const formattedChoices = choicesTextArray.map((c, i) => `${i + 1}. ${c}`).join('\n');
         const systemInstruction = 
@@ -552,7 +553,7 @@
             "ANSWER: <exact text of chosen option>";
 
         const userPrompt = `Question Context / Prompt:\n${promptText}\n\nAvailable Options:\n${formattedChoices}`;
-        const rawReply = await callAI(systemInstruction, userPrompt, [], false);
+        const rawReply = await callAI(systemInstruction, userPrompt, [], false, 12000);
         logDebug('AI raw reply', rawReply);
 
         if (!rawReply) return null;
@@ -592,20 +593,35 @@
         return matched || null;
     }
 
-    // SPELLING: Grounded via Exa Instant (~250ms) to vocabulary.com
+    // SPELLING: Tries capped Exa Instant (10s max), automatically falls back to fast LLM memory if search stalls
     async function askAISpelling(sentenceContext) {
-        let systemInstruction = 
+        const systemInstruction = 
             "You are an expert Vocabulary.com spelling solver.\n" +
-            "You are given an example sentence with blanks (________) from Vocabulary.com.\n" +
-            "Identify the exact academic headword being tested.\n" +
-            "Search vocabulary.com for this exact sentence to locate the word entry.\n" +
-            "The target spelling is always the primary dictionary headword / base lemma.\n" +
+            "You are given an example sentence or definition with a blank (________) from Vocabulary.com.\n" +
+            "Identify the exact academic vocabulary word that fits the blank and part of speech described (e.g., if it says 'The adjective ________ describes something that cannot be divided into parts', the answer is 'indivisible').\n" +
             "Output your final answer on the last line strictly in this format:\n" +
             "ANSWER: <single word>";
 
-        const userPrompt = `Sentence / Definition:\n"${sentenceContext}"\n\nFind the target vocabulary headword:`;
-        const rawReply = await callAI(systemInstruction, userPrompt, [], true); // enableSpellingSearch = true
-        logDebug('AI spelling reply', rawReply);
+        const userPrompt = `Sentence / Definition:\n"${sentenceContext}"\n\nIdentify the exact vocabulary word for the blank:`;
+
+        let rawReply = null;
+
+        if (config.spellSearch) {
+            try {
+                // Try Exa Instant with a strict 10-second cap
+                rawReply = await callAI(systemInstruction, userPrompt, [], true, 10000);
+                logDebug('AI spelling reply (Exa Instant)', rawReply);
+            } catch (err) {
+                logDebug(`Exa search timed out or failed (${err.message}), falling back to pure memory...`);
+                setStatus('⚡ Search slow, using instant memory fallback...');
+            }
+        }
+
+        // Automatic fallback to pure model memory if search was disabled, timed out, or returned empty
+        if (!rawReply) {
+            rawReply = await callAI(systemInstruction, userPrompt, [], false, 12000);
+            logDebug('AI spelling reply (Memory)', rawReply);
+        }
 
         let parsed = extractFinalAnswer(rawReply);
         if (!parsed && rawReply) {
@@ -615,7 +631,6 @@
         return parsed ? parsed.toLowerCase().replace(/[^a-z-]/g, '') : null;
     }
 
-    // PICTURE CHOICE: Pure fast multimodal vision
     async function askAIPictureChoice(wordPrompt, pictureUrls) {
         const systemInstruction = 
             "You are an expert Vocabulary.com picture-choice solver.\n" +
@@ -626,7 +641,7 @@
             "ANSWER: <1, 2, 3, or 4>";
 
         const userPrompt = `Target Word Prompt: "${wordPrompt}"\nWhich option (1, 2, 3, or 4) matches this word?`;
-        const rawReply = await callAI(systemInstruction, userPrompt, pictureUrls, false);
+        const rawReply = await callAI(systemInstruction, userPrompt, pictureUrls, false, 14000);
         logDebug('AI picture reply', rawReply);
 
         const parsed = extractFinalAnswer(rawReply);
@@ -861,7 +876,7 @@
 
     function startEngine() {
         injectUI();
-        logDebug('Vocab Solver Engine 2.2.2 started on ' + location.pathname);
+        logDebug('Vocab Solver Engine 2.2.3 started on ' + location.pathname);
 
         const observer = new MutationObserver(() => {
             checkAndSolve();
