@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      2.2.0
-// @description  Solves Vocabulary.com.
+// @version      2.2.2
+// @description  Solves Vocabulary.com with instant Exa search strictly for spelling questions, pure LLM memory for multiple choice, and anti-lockout pacing.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -25,7 +25,7 @@
         OR_MODEL: 'vcom_or_custom_model',
         MODE: 'vcom_ai_mode',         // 'highlight' | 'auto'
         SPEED: 'vcom_ai_speed',       // 'safe' | 'fast' | 'instant'
-        WEB_SEARCH: 'vcom_web_search', // 'true' | 'false'
+        SPELL_SEARCH: 'vcom_spell_search', // 'true' | 'false'
         CACHE: 'vcom_ai_cache'
     };
 
@@ -46,7 +46,7 @@
         orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'deepseek/deepseek-chat',
         mode: localStorage.getItem(STORAGE_KEYS.MODE) || 'auto',
         speed: localStorage.getItem(STORAGE_KEYS.SPEED) || 'safe',
-        webSearch: localStorage.getItem(STORAGE_KEYS.WEB_SEARCH) !== 'false',
+        spellSearch: localStorage.getItem(STORAGE_KEYS.SPELL_SEARCH) !== 'false', // Exa Instant for spelling only
         cache: JSON.parse(localStorage.getItem(STORAGE_KEYS.CACHE) || '{}')
     };
 
@@ -163,7 +163,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v2.2.0</span>
+                    <span>AI Vocab Solver v2.2.2</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
@@ -187,10 +187,10 @@
                     </div>
                 </div>
                 <div class="vcom-ai-field">
-                    <label for="vcom-web-search">Live Search (vocabulary.com Grounding)</label>
-                    <select id="vcom-web-search" class="vcom-ai-select">
-                        <option value="true" ${config.webSearch ? 'selected' : ''}>Enabled (openrouter:web_search / Google Search)</option>
-                        <option value="false" ${!config.webSearch ? 'selected' : ''}>Disabled (Model Memory Only)</option>
+                    <label for="vcom-spell-search">Exa Instant Search (Spelling Questions Only)</label>
+                    <select id="vcom-spell-search" class="vcom-ai-select">
+                        <option value="true" ${config.spellSearch ? 'selected' : ''}>Enabled (Exa ~250ms / Google Grounding)</option>
+                        <option value="false" ${!config.spellSearch ? 'selected' : ''}>Disabled (Fast Pure Model Memory)</option>
                     </select>
                 </div>
                 <div class="vcom-ai-row" style="margin-bottom: 10px;">
@@ -266,10 +266,10 @@
                 checkAndSolve();
             });
 
-            document.getElementById('vcom-web-search').addEventListener('change', (e) => {
-                config.webSearch = e.target.value === 'true';
-                localStorage.setItem(STORAGE_KEYS.WEB_SEARCH, config.webSearch ? 'true' : 'false');
-                setStatus(`Web Search: ${config.webSearch ? 'Enabled' : 'Disabled'}`);
+            document.getElementById('vcom-spell-search').addEventListener('change', (e) => {
+                config.spellSearch = e.target.value === 'true';
+                localStorage.setItem(STORAGE_KEYS.SPELL_SEARCH, config.spellSearch ? 'true' : 'false');
+                setStatus(`Spelling Search: ${config.spellSearch ? 'Exa Instant' : 'Off'}`);
                 lastSolvedSignature = '';
             });
 
@@ -420,7 +420,7 @@
     }
 
     // ==========================================
-    // 5. UNIFIED API ENGINE (SERVER TOOLS INTEGRATION)
+    // 5. UNIFIED API ENGINE (EXA INSTANT STRICTLY FOR SPELLING)
     // ==========================================
     function cleanAIReply(reply) {
         if (!reply || typeof reply !== 'string') return '';
@@ -431,14 +431,14 @@
         return stripped;
     }
 
-    async function callAI(systemPrompt, userPrompt, imageUrls = []) {
+    async function callAI(systemPrompt, userPrompt, imageUrls = [], enableSpellingSearch = false) {
         if (!config.apiKey) {
             setStatus('⚠️ Missing API Key!');
             return null;
         }
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 25000);
+        const timeoutId = setTimeout(() => controller.abort(), 18000);
 
         let endpoint, headers, body;
 
@@ -454,8 +454,8 @@
                     generationConfig: { temperature: 0.1, maxOutputTokens: 350 }
                 };
 
-                // Native Google Search Grounding for Gemini
-                if (config.webSearch) {
+                // Gemini Native Google Search ONLY for spelling
+                if (enableSpellingSearch && config.spellSearch) {
                     reqBody.tools = [{ googleSearch: {} }];
                 }
 
@@ -486,16 +486,17 @@
                         { role: 'user', content: userContent }
                     ],
                     temperature: 0.1,
-                    max_tokens: 450
+                    max_tokens: 350
                 };
 
-                // Official OpenRouter Server Tool: openrouter:web_search
-                if (config.webSearch) {
+                // Exa Instant search strictly on vocabulary.com ONLY for spelling
+                if (enableSpellingSearch && config.spellSearch) {
                     reqBody.tools = [
                         {
                             type: 'openrouter:web_search',
                             parameters: {
-                                engine: 'auto',
+                                engine: 'exa',
+                                mode: 'instant', // ~250ms latency
                                 max_results: 3,
                                 allowed_domains: ['vocabulary.com']
                             }
@@ -542,16 +543,16 @@
         return lines.length > 0 ? lines[lines.length - 1].replace(/^["'*\s]+|["'*\s]+$/g, '').trim() : '';
     }
 
+    // MULTIPLE CHOICE: Pure fast LLM memory (0 web search overhead)
     async function askAIMultipleChoice(promptText, choicesTextArray) {
         const formattedChoices = choicesTextArray.map((c, i) => `${i + 1}. ${c}`).join('\n');
-        let systemInstruction = 
+        const systemInstruction = 
             "You are an expert Vocabulary.com solver. Select the single best answer choice.\n" +
-            "If unsure, search vocabulary.com to verify exact dictionary usage and citations.\n" +
             "Output ONLY the text or number of the correct option in this exact format:\n" +
             "ANSWER: <exact text of chosen option>";
 
         const userPrompt = `Question Context / Prompt:\n${promptText}\n\nAvailable Options:\n${formattedChoices}`;
-        const rawReply = await callAI(systemInstruction, userPrompt);
+        const rawReply = await callAI(systemInstruction, userPrompt, [], false);
         logDebug('AI raw reply', rawReply);
 
         if (!rawReply) return null;
@@ -591,18 +592,19 @@
         return matched || null;
     }
 
+    // SPELLING: Grounded via Exa Instant (~250ms) to vocabulary.com
     async function askAISpelling(sentenceContext) {
         let systemInstruction = 
             "You are an expert Vocabulary.com spelling solver.\n" +
-            "You are given an example sentence with blanks (________) taken directly from Vocabulary.com.\n" +
-            "Your task is to identify the exact academic headword being tested.\n" +
+            "You are given an example sentence with blanks (________) from Vocabulary.com.\n" +
+            "Identify the exact academic headword being tested.\n" +
             "Search vocabulary.com for this exact sentence to locate the word entry.\n" +
             "The target spelling is always the primary dictionary headword / base lemma.\n" +
             "Output your final answer on the last line strictly in this format:\n" +
             "ANSWER: <single word>";
 
         const userPrompt = `Sentence / Definition:\n"${sentenceContext}"\n\nFind the target vocabulary headword:`;
-        const rawReply = await callAI(systemInstruction, userPrompt);
+        const rawReply = await callAI(systemInstruction, userPrompt, [], true); // enableSpellingSearch = true
         logDebug('AI spelling reply', rawReply);
 
         let parsed = extractFinalAnswer(rawReply);
@@ -613,6 +615,7 @@
         return parsed ? parsed.toLowerCase().replace(/[^a-z-]/g, '') : null;
     }
 
+    // PICTURE CHOICE: Pure fast multimodal vision
     async function askAIPictureChoice(wordPrompt, pictureUrls) {
         const systemInstruction = 
             "You are an expert Vocabulary.com picture-choice solver.\n" +
@@ -623,8 +626,7 @@
             "ANSWER: <1, 2, 3, or 4>";
 
         const userPrompt = `Target Word Prompt: "${wordPrompt}"\nWhich option (1, 2, 3, or 4) matches this word?`;
-
-        const rawReply = await callAI(systemInstruction, userPrompt, pictureUrls);
+        const rawReply = await callAI(systemInstruction, userPrompt, pictureUrls, false);
         logDebug('AI picture reply', rawReply);
 
         const parsed = extractFinalAnswer(rawReply);
@@ -694,7 +696,7 @@
             setStatus('⚡ Solved from local cache');
         } else {
             const activeModelName = config.provider === 'gemini' ? config.model : config.orModel;
-            setStatus(`🤖 Asking ${activeModelName}${config.webSearch ? ' (Search)' : ''}...`);
+            setStatus(`🤖 Asking ${activeModelName}...`);
             try {
                 winningAnswerText = await askAIMultipleChoice(fullPrompt, choicesText);
                 if (winningAnswerText) {
@@ -793,7 +795,7 @@
 
         if (!wordAnswer) {
             const activeModelName = config.provider === 'gemini' ? config.model : config.orModel;
-            setStatus(`🤖 Spelling via ${activeModelName}${config.webSearch ? ' (Search)' : ''}...`);
+            setStatus(`🤖 Spelling via ${activeModelName}${config.spellSearch ? ' (Exa Instant)' : ''}...`);
             try {
                 wordAnswer = await askAISpelling(sentenceText);
                 if (wordAnswer) {
@@ -859,7 +861,7 @@
 
     function startEngine() {
         injectUI();
-        logDebug('Vocab Solver Engine 2.2.0 started on ' + location.pathname);
+        logDebug('Vocab Solver Engine 2.2.2 started on ' + location.pathname);
 
         const observer = new MutationObserver(() => {
             checkAndSolve();
