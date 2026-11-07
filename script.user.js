@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      2.0.2
-// @description  Solves Vocabulary.com (Text, Spelling, Picture Choices, Vocab Jam) with high-accuracy spelling recall, synonym resolution, and anti-lockout pacing.
+// @version      2.1.0
+// @description  Solves Vocabulary.com with live web search grounding (Gemini Google Search / OpenRouter Web), multi-image vision, and anti-lockout pacing.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -23,8 +23,9 @@
         API_KEY: 'vcom_ai_api_key',
         MODEL: 'vcom_ai_model',
         OR_MODEL: 'vcom_or_custom_model',
-        MODE: 'vcom_ai_mode',       // 'highlight' | 'auto'
-        SPEED: 'vcom_ai_speed',     // 'safe' | 'fast' | 'instant'
+        MODE: 'vcom_ai_mode',         // 'highlight' | 'auto'
+        SPEED: 'vcom_ai_speed',       // 'safe' | 'fast' | 'instant'
+        WEB_SEARCH: 'vcom_web_search', // 'true' | 'false'
         CACHE: 'vcom_ai_cache'
     };
 
@@ -32,10 +33,10 @@
         { id: 'gemini-flash-latest', label: 'gemini-flash-latest (Recommended: High Accuracy)' },
         { id: 'gemini-flash-lite-latest', label: 'gemini-flash-lite-latest (Fastest Alias)' },
         { id: 'gemini-pro-latest', label: 'gemini-pro-latest (Pro Alias)' },
+        { id: 'gemini-2.5-flash', label: 'gemini-2.5-flash (Pinned 2.5 Flash)' },
         { id: 'gemini-3.1-flash-lite', label: 'gemini-3.1-flash-lite (Pinned 3.1 Lite)' },
         { id: 'gemini-3.5-flash-lite', label: 'gemini-3.5-flash-lite (Pinned 3.5 Lite)' },
-        { id: 'gemini-3.8-flash', label: 'gemini-3.8-flash (Pinned 3.8 Flash)' },
-        { id: 'gemini-3.1-pro-preview', label: 'gemini-3.1-pro-preview (Pinned 3.1 Pro)' }
+        { id: 'gemini-3.8-flash', label: 'gemini-3.8-flash (Pinned 3.8 Flash)' }
     ];
 
     let config = {
@@ -45,6 +46,7 @@
         orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'deepseek/deepseek-chat',
         mode: localStorage.getItem(STORAGE_KEYS.MODE) || 'auto',
         speed: localStorage.getItem(STORAGE_KEYS.SPEED) || 'safe',
+        webSearch: localStorage.getItem(STORAGE_KEYS.WEB_SEARCH) !== 'false', // Enabled by default
         cache: JSON.parse(localStorage.getItem(STORAGE_KEYS.CACHE) || '{}')
     };
 
@@ -161,7 +163,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v2.0.2</span>
+                    <span>AI Vocab Solver v2.1.0</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
@@ -184,6 +186,13 @@
                         ${!isGemini ? '<button id="vcom-search-models-btn" class="vcom-ai-btn secondary" style="white-space:nowrap;">Search</button>' : ''}
                     </div>
                 </div>
+                <div class="vcom-ai-field">
+                    <label for="vcom-web-search">Web Search Grounding</label>
+                    <select id="vcom-web-search" class="vcom-ai-select">
+                        <option value="true" ${config.webSearch ? 'selected' : ''}>Enabled (Live Search Vocabulary.com)</option>
+                        <option value="false" ${!config.webSearch ? 'selected' : ''}>Disabled (Model Memory Only)</option>
+                    </select>
+                </div>
                 <div class="vcom-ai-row" style="margin-bottom: 10px;">
                     <div style="flex:1;">
                         <label for="vcom-mode" style="display:block; margin-bottom:4px; color:#94a3b8; font-size:11px;">Mode</label>
@@ -193,7 +202,7 @@
                         </select>
                     </div>
                     <div style="flex:1;">
-                        <label for="vcom-speed" style="display:block; margin-bottom:4px; color:#94a3b8; font-size:11px;">Pacing (Anti-Lockout)</label>
+                        <label for="vcom-speed" style="display:block; margin-bottom:4px; color:#94a3b8; font-size:11px;">Pacing</label>
                         <select id="vcom-speed" class="vcom-ai-select">
                             <option value="safe" ${config.speed === 'safe' ? 'selected' : ''}>Safe (3-5s)</option>
                             <option value="fast" ${config.speed === 'fast' ? 'selected' : ''}>Fast (1.5-2.5s)</option>
@@ -255,6 +264,13 @@
                 setStatus(`Model: ${val}`);
                 lastSolvedSignature = '';
                 checkAndSolve();
+            });
+
+            document.getElementById('vcom-web-search').addEventListener('change', (e) => {
+                config.webSearch = e.target.value === 'true';
+                localStorage.setItem(STORAGE_KEYS.WEB_SEARCH, config.webSearch ? 'true' : 'false');
+                setStatus(`Web Search: ${config.webSearch ? 'Enabled' : 'Disabled'}`);
+                lastSolvedSignature = '';
             });
 
             const searchBtn = document.getElementById('vcom-search-models-btn');
@@ -404,7 +420,7 @@
     }
 
     // ==========================================
-    // 5. UNBREAKABLE AI CALL ENGINE
+    // 5. UNIFIED API CALL (WITH GOOGLE & OPENROUTER SEARCH)
     // ==========================================
     function cleanAIReply(reply) {
         if (!reply || typeof reply !== 'string') return '';
@@ -422,7 +438,7 @@
         }
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 16000);
+        const timeoutId = setTimeout(() => controller.abort(), 20000);
 
         let endpoint, headers, body;
 
@@ -432,11 +448,18 @@
                 headers = { 'Content-Type': 'application/json' };
 
                 let contentParts = [{ text: userPrompt }];
-                body = JSON.stringify({
+                const reqBody = {
                     systemInstruction: { parts: [{ text: systemPrompt }] },
                     contents: [{ parts: contentParts }],
                     generationConfig: { temperature: 0.1, maxOutputTokens: 350 }
-                });
+                };
+
+                // Native Google Search Grounding for Gemini
+                if (config.webSearch) {
+                    reqBody.tools = [{ googleSearch: {} }];
+                }
+
+                body = JSON.stringify(reqBody);
             } else {
                 endpoint = 'https://openrouter.ai/api/v1/chat/completions';
                 headers = {
@@ -456,7 +479,7 @@
                     userContent = userPrompt;
                 }
 
-                body = JSON.stringify({
+                const reqBody = {
                     model: config.orModel,
                     messages: [
                         { role: 'system', content: systemPrompt },
@@ -464,7 +487,14 @@
                     ],
                     temperature: 0.1,
                     max_tokens: 400
-                });
+                };
+
+                // Live Web Search Plugin for OpenRouter
+                if (config.webSearch) {
+                    reqBody.plugins = [{ id: 'web', max_results: 3 }];
+                }
+
+                body = JSON.stringify(reqBody);
             }
 
             const res = await fetch(endpoint, { method: 'POST', headers, body, signal: controller.signal });
@@ -479,7 +509,9 @@
             const data = await res.json();
             let rawContent = '';
             if (config.provider === 'gemini') {
-                rawContent = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                // Grounded search responses may be split across multiple parts
+                const parts = data?.candidates?.[0]?.content?.parts || [];
+                rawContent = parts.map(p => p.text || '').filter(Boolean).join('\n');
             } else {
                 const msg = data?.choices?.[0]?.message;
                 rawContent = msg?.content || msg?.reasoning || msg?.reasoning_content || '';
@@ -504,13 +536,16 @@
 
     async function askAIMultipleChoice(promptText, choicesTextArray) {
         const formattedChoices = choicesTextArray.map((c, i) => `${i + 1}. ${c}`).join('\n');
-        const systemInstruction = 
+        let systemInstruction = 
             "You are an expert Vocabulary.com test solver. Select the single best answer choice for the vocabulary question.\n" +
             "Output ONLY the text or number of the correct option in this exact format:\n" +
             "ANSWER: <exact text of chosen option>";
 
-        const userPrompt = `Question Context / Prompt:\n${promptText}\n\nAvailable Options:\n${formattedChoices}`;
+        if (config.webSearch) {
+            systemInstruction += "\nIf unsure about obscure definitions or citations, use web search for site:vocabulary.com to confirm.";
+        }
 
+        const userPrompt = `Question Context / Prompt:\n${promptText}\n\nAvailable Options:\n${formattedChoices}`;
         const rawReply = await callAI(systemInstruction, userPrompt);
         logDebug('AI raw reply', rawReply);
 
@@ -519,8 +554,10 @@
         const parsed = extractFinalAnswer(rawReply);
         logDebug('Parsed final answer', parsed);
 
+        // 1. Exact match
         let matched = choicesTextArray.find(c => c.toLowerCase().trim() === parsed.toLowerCase().trim());
 
+        // 2. Numbered index match (1, 2, 3, 4)
         if (!matched) {
             const numMatch = parsed.match(/^([1-4])\b/);
             if (numMatch) {
@@ -531,6 +568,7 @@
             }
         }
 
+        // 3. Substring match
         if (!matched && parsed.length >= 3) {
             matched = choicesTextArray.find(c => 
                 c.toLowerCase().includes(parsed.toLowerCase()) || 
@@ -538,6 +576,7 @@
             );
         }
 
+        // 4. Raw response fallback scan
         if (!matched) {
             const replyLower = rawReply.toLowerCase();
             for (const choice of choicesTextArray) {
@@ -552,18 +591,21 @@
     }
 
     async function askAISpelling(sentenceContext) {
-        const systemInstruction = 
+        let systemInstruction = 
             "You are an expert Vocabulary.com spelling solver.\n" +
-            "You are given a dictionary definition or sentence with blanks (________) taken directly from Vocabulary.com.\n" +
+            "You are given an example sentence with blanks (________) taken directly from Vocabulary.com.\n" +
             "Your task is to identify the exact academic headword being tested.\n" +
             "Rules:\n" +
-            "1. Vocabulary.com tests formal academic, SAT, GRE, and literary vocabulary words. Never guess basic colloquial words (e.g. avoid 'extra', 'help', 'read').\n" +
-            "2. Identify the core definition and grammatical context of the blank(s).\n" +
-            "3. If different blanks take different forms, the target spelling is always the primary dictionary headword / base lemma (e.g., 'supplement' rather than 'supplementary').\n" +
-            "4. Reason briefly in 1-2 lines, then output your final answer on the last line strictly in this format:\n" +
-            "ANSWER: <single word>";
+            "1. Vocabulary.com tests formal academic, SAT, GRE, and literary vocabulary. Never guess basic colloquial words.\n" +
+            "2. Identify the target spelling as the primary dictionary headword / base lemma.\n";
 
-        const userPrompt = `Sentence / Definition:\n"${sentenceContext}"\n\nIdentify the target vocabulary headword:`;
+        if (config.webSearch) {
+            systemInstruction += "3. Use web search to search site:vocabulary.com for the exact sentence to retrieve the exact word tested.\n";
+        }
+
+        systemInstruction += "Output your final answer on the last line strictly in this format:\nANSWER: <single word>";
+
+        const userPrompt = `Sentence / Definition:\n"${sentenceContext}"\n\nFind the target vocabulary headword:`;
         const rawReply = await callAI(systemInstruction, userPrompt);
         logDebug('AI spelling reply', rawReply);
 
@@ -603,7 +645,7 @@
         } else if (config.speed === 'fast') {
             return Math.floor(Math.random() * 1000) + 1500;
         } else {
-            return Math.floor(Math.random() * 1500) + 3200; // Safe pacing (prevents 5-minute lockout)
+            return Math.floor(Math.random() * 1500) + 3200; // Safe: 3.2s - 4.7s
         }
     }
 
@@ -656,7 +698,7 @@
             setStatus('⚡ Solved from local cache');
         } else {
             const activeModelName = config.provider === 'gemini' ? config.model : config.orModel;
-            setStatus(`🤖 Asking ${activeModelName}...`);
+            setStatus(`🤖 Asking ${activeModelName}${config.webSearch ? ' (Search)' : ''}...`);
             try {
                 winningAnswerText = await askAIMultipleChoice(fullPrompt, choicesText);
                 if (winningAnswerText) {
@@ -755,7 +797,7 @@
 
         if (!wordAnswer) {
             const activeModelName = config.provider === 'gemini' ? config.model : config.orModel;
-            setStatus(`🤖 Spelling via ${activeModelName}...`);
+            setStatus(`🤖 Spelling via ${activeModelName}${config.webSearch ? ' (Search)' : ''}...`);
             try {
                 wordAnswer = await askAISpelling(sentenceText);
                 if (wordAnswer) {
@@ -821,7 +863,7 @@
 
     function startEngine() {
         injectUI();
-        logDebug('Vocab Solver Engine 2.0.2 started on ' + location.pathname);
+        logDebug('Vocab Solver Engine 2.1.0 started on ' + location.pathname);
 
         const observer = new MutationObserver(() => {
             checkAndSolve();
