@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      2.2.3
-// @description  Solves Vocabulary.com with capped Exa Instant search (max_uses: 1) + automatic memory fallback so spelling never times out.
+// @version      2.3.0
+// @description  Solves Vocabulary.com with native audio ripping for spelling questions (audio-to-text), multimodal image support, and anti-lockout pacing.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -16,7 +16,42 @@
     'use strict';
 
     // ==========================================
-    // 1. STATE & STORAGE MANAGEMENT
+    // 1. AUDIO STREAM INTERCEPTOR
+    // ==========================================
+    let interceptedAudioUrl = null;
+
+    const OriginalAudio = window.Audio;
+    window.Audio = class extends OriginalAudio {
+        constructor(src) {
+            super(src);
+            if (src && typeof src === 'string') {
+                interceptedAudioUrl = src;
+                console.log('[VCOM-AI] Audio intercepted via new Audio():', src);
+            }
+        }
+    };
+
+    const origPlay = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function() {
+        if (this.src && typeof this.src === 'string') {
+            interceptedAudioUrl = this.src;
+            console.log('[VCOM-AI] Audio intercepted via play():', this.src);
+        }
+        return origPlay.apply(this, arguments);
+    };
+
+    const origFetch = window.fetch;
+    window.fetch = async function(...args) {
+        const url = typeof args[0] === 'string' ? args[0] : args[0]?.url;
+        if (url && (url.includes('.mp3') || url.includes('/audio/') || url.includes('audio.vocabulary.com'))) {
+            interceptedAudioUrl = url;
+            console.log('[VCOM-AI] Audio intercepted via fetch():', url);
+        }
+        return origFetch.apply(this, args);
+    };
+
+    // ==========================================
+    // 2. STATE & STORAGE MANAGEMENT
     // ==========================================
     const STORAGE_KEYS = {
         PROVIDER: 'vcom_ai_provider',
@@ -25,28 +60,27 @@
         OR_MODEL: 'vcom_or_custom_model',
         MODE: 'vcom_ai_mode',         // 'highlight' | 'auto'
         SPEED: 'vcom_ai_speed',       // 'safe' | 'fast' | 'instant'
-        SPELL_SEARCH: 'vcom_spell_search', // 'true' | 'false'
+        AUDIO_RIP: 'vcom_audio_rip',   // 'true' | 'false'
         CACHE: 'vcom_ai_cache'
     };
 
     const GEMINI_MODELS = [
-        { id: 'gemini-flash-latest', label: 'gemini-flash-latest (Recommended: High Accuracy)' },
+        { id: 'gemini-flash-latest', label: 'gemini-flash-latest (Recommended: High Accuracy & Audio)' },
         { id: 'gemini-flash-lite-latest', label: 'gemini-flash-lite-latest (Fastest Alias)' },
         { id: 'gemini-pro-latest', label: 'gemini-pro-latest (Pro Alias)' },
         { id: 'gemini-2.5-flash', label: 'gemini-2.5-flash (Pinned 2.5 Flash)' },
         { id: 'gemini-3.1-flash-lite', label: 'gemini-3.1-flash-lite (Pinned 3.1 Lite)' },
-        { id: 'gemini-3.5-flash-lite', label: 'gemini-3.5-flash-lite (Pinned 3.5 Lite)' },
-        { id: 'gemini-3.8-flash', label: 'gemini-3.8-flash (Pinned 3.8 Flash)' }
+        { id: 'gemini-3.5-flash-lite', label: 'gemini-3.5-flash-lite (Pinned 3.5 Lite)' }
     ];
 
     let config = {
         provider: localStorage.getItem(STORAGE_KEYS.PROVIDER) || 'gemini',
         apiKey: localStorage.getItem(STORAGE_KEYS.API_KEY) || '',
         model: localStorage.getItem(STORAGE_KEYS.MODEL) || 'gemini-flash-latest',
-        orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'deepseek/deepseek-chat',
+        orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'google/gemini-2.5-flash',
         mode: localStorage.getItem(STORAGE_KEYS.MODE) || 'auto',
         speed: localStorage.getItem(STORAGE_KEYS.SPEED) || 'safe',
-        spellSearch: localStorage.getItem(STORAGE_KEYS.SPELL_SEARCH) !== 'false',
+        audioRip: localStorage.getItem(STORAGE_KEYS.AUDIO_RIP) !== 'false',
         cache: JSON.parse(localStorage.getItem(STORAGE_KEYS.CACHE) || '{}')
     };
 
@@ -74,9 +108,6 @@
         return raw.toLowerCase().replace(/\s+/g, ' ');
     }
 
-    // ==========================================
-    // 2. BLOCKER & LOCKOUT MANAGEMENT
-    // ==========================================
     function checkBlockersAndLockout() {
         const legacyBlockers = document.querySelectorAll('.blocker');
         legacyBlockers.forEach(b => b.remove());
@@ -163,13 +194,13 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v2.2.3</span>
+                    <span>AI Vocab Solver v2.3.0</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
                     <label for="vcom-provider">Provider</label>
                     <select id="vcom-provider" class="vcom-ai-select">
-                        <option value="gemini" ${isGemini ? 'selected' : ''}>Google Gemini API</option>
+                        <option value="gemini" ${isGemini ? 'selected' : ''}>Google Gemini API (Best Audio Support)</option>
                         <option value="openrouter" ${!isGemini ? 'selected' : ''}>OpenRouter</option>
                     </select>
                 </div>
@@ -187,10 +218,10 @@
                     </div>
                 </div>
                 <div class="vcom-ai-field">
-                    <label for="vcom-spell-search">Exa Instant Search (Spelling Questions Only)</label>
-                    <select id="vcom-spell-search" class="vcom-ai-select">
-                        <option value="true" ${config.spellSearch ? 'selected' : ''}>Enabled (Exa Instant + Auto-Fallback)</option>
-                        <option value="false" ${!config.spellSearch ? 'selected' : ''}>Disabled (Fast Pure Model Memory)</option>
+                    <label for="vcom-audio-rip">Audio Ripper (Auto-Transcribe Pronunciation)</label>
+                    <select id="vcom-audio-rip" class="vcom-ai-select">
+                        <option value="true" ${config.audioRip ? 'selected' : ''}>Enabled (Rips & Feeds Spoken Word to AI)</option>
+                        <option value="false" ${!config.audioRip ? 'selected' : ''}>Disabled (Context Definition Only)</option>
                     </select>
                 </div>
                 <div class="vcom-ai-row" style="margin-bottom: 10px;">
@@ -226,7 +257,7 @@
         modal.id = 'vcom-model-search-modal';
         modal.innerHTML = `
             <div style="font-weight:700; font-size:14px; margin-bottom:8px; color:#38bdf8;">Search OpenRouter Models</div>
-            <input type="text" id="vcom-model-filter" class="vcom-ai-input" placeholder="Type to filter (e.g. deepseek, llama, gemini)...">
+            <input type="text" id="vcom-model-filter" class="vcom-ai-input" placeholder="Type to filter (e.g. gemini, llama, deepseek)...">
             <div id="vcom-model-list"></div>
             <button id="vcom-close-modal" class="vcom-ai-btn secondary" style="margin-top:10px; width:100%;">Close</button>
         `;
@@ -266,10 +297,10 @@
                 checkAndSolve();
             });
 
-            document.getElementById('vcom-spell-search').addEventListener('change', (e) => {
-                config.spellSearch = e.target.value === 'true';
-                localStorage.setItem(STORAGE_KEYS.SPELL_SEARCH, config.spellSearch ? 'true' : 'false');
-                setStatus(`Spelling Search: ${config.spellSearch ? 'Exa Instant' : 'Off'}`);
+            document.getElementById('vcom-audio-rip').addEventListener('change', (e) => {
+                config.audioRip = e.target.value === 'true';
+                localStorage.setItem(STORAGE_KEYS.AUDIO_RIP, config.audioRip ? 'true' : 'false');
+                setStatus(`Audio Ripper: ${config.audioRip ? 'Enabled' : 'Disabled'}`);
                 lastSolvedSignature = '';
             });
 
@@ -419,8 +450,39 @@
         }
     }
 
+    function setReactiveInputValue(input, value) {
+        input.focus();
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+        if (nativeSetter) {
+            nativeSetter.call(input, value);
+        } else {
+            input.value = value;
+        }
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
     // ==========================================
-    // 5. UNIFIED API ENGINE (CAPPED EXA + AUTO-FALLBACK)
+    // 5. AUDIO CONVERTER
+    // ==========================================
+    async function fetchAudioAsBase64(url) {
+        try {
+            const resp = await fetch(url);
+            const blob = await resp.blob();
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result.split(',')[1]);
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+            });
+        } catch (e) {
+            logDebug('Failed to fetch/convert audio', e.message);
+            return null;
+        }
+    }
+
+    // ==========================================
+    // 6. MULTIMODAL API ENGINE (TEXT, IMAGES & AUDIO)
     // ==========================================
     function cleanAIReply(reply) {
         if (!reply || typeof reply !== 'string') return '';
@@ -431,14 +493,14 @@
         return stripped;
     }
 
-    async function callAI(systemPrompt, userPrompt, imageUrls = [], useSearch = false, timeoutMs = 14000) {
+    async function callAI(systemPrompt, userPrompt, imageUrls = [], base64Audio = null) {
         if (!config.apiKey) {
             setStatus('⚠️ Missing API Key!');
             return null;
         }
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        const timeoutId = setTimeout(() => controller.abort(), 16000);
 
         let endpoint, headers, body;
 
@@ -447,18 +509,22 @@
                 endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent?key=${encodeURIComponent(config.apiKey)}`;
                 headers = { 'Content-Type': 'application/json' };
 
-                let contentParts = [{ text: userPrompt }];
-                const reqBody = {
+                let contentParts = [];
+                if (base64Audio) {
+                    contentParts.push({
+                        inlineData: {
+                            mimeType: 'audio/mp3',
+                            data: base64Audio
+                        }
+                    });
+                }
+                contentParts.push({ text: userPrompt });
+
+                body = JSON.stringify({
                     systemInstruction: { parts: [{ text: systemPrompt }] },
                     contents: [{ parts: contentParts }],
-                    generationConfig: { temperature: 0.1, maxOutputTokens: 300 }
-                };
-
-                if (useSearch) {
-                    reqBody.tools = [{ googleSearch: {} }];
-                }
-
-                body = JSON.stringify(reqBody);
+                    generationConfig: { temperature: 0.1, maxOutputTokens: 250 }
+                });
             } else {
                 endpoint = 'https://openrouter.ai/api/v1/chat/completions';
                 headers = {
@@ -469,7 +535,12 @@
                 };
 
                 let userContent;
-                if (imageUrls && imageUrls.length > 0) {
+                if (base64Audio) {
+                    userContent = [
+                        { type: 'text', text: userPrompt },
+                        { type: 'input_audio', input_audio: { data: base64Audio, format: 'mp3' } }
+                    ];
+                } else if (imageUrls && imageUrls.length > 0) {
                     userContent = [{ type: 'text', text: userPrompt }];
                     imageUrls.forEach(url => {
                         userContent.push({ type: 'image_url', image_url: { url } });
@@ -478,7 +549,7 @@
                     userContent = userPrompt;
                 }
 
-                const reqBody = {
+                body = JSON.stringify({
                     model: config.orModel,
                     messages: [
                         { role: 'system', content: systemPrompt },
@@ -486,27 +557,7 @@
                     ],
                     temperature: 0.1,
                     max_tokens: 300
-                };
-
-                // Tightly capped Exa Instant search: 1 search max, small character budget
-                if (useSearch) {
-                    reqBody.max_tool_calls = 1;
-                    reqBody.tools = [
-                        {
-                            type: 'openrouter:web_search',
-                            parameters: {
-                                engine: 'exa',
-                                mode: 'instant',
-                                max_uses: 1,
-                                max_results: 2,
-                                max_characters: 1200,
-                                allowed_domains: ['vocabulary.com']
-                            }
-                        }
-                    ];
-                }
-
-                body = JSON.stringify(reqBody);
+                });
             }
 
             const res = await fetch(endpoint, { method: 'POST', headers, body, signal: controller.signal });
@@ -553,7 +604,7 @@
             "ANSWER: <exact text of chosen option>";
 
         const userPrompt = `Question Context / Prompt:\n${promptText}\n\nAvailable Options:\n${formattedChoices}`;
-        const rawReply = await callAI(systemInstruction, userPrompt, [], false, 12000);
+        const rawReply = await callAI(systemInstruction, userPrompt);
         logDebug('AI raw reply', rawReply);
 
         if (!rawReply) return null;
@@ -580,48 +631,22 @@
             );
         }
 
-        if (!matched) {
-            const replyLower = rawReply.toLowerCase();
-            for (const choice of choicesTextArray) {
-                if (choice.length >= 3 && replyLower.includes(choice.toLowerCase())) {
-                    matched = choice;
-                    break;
-                }
-            }
-        }
-
         return matched || null;
     }
 
-    // SPELLING: Tries capped Exa Instant (10s max), automatically falls back to fast LLM memory if search stalls
-    async function askAISpelling(sentenceContext) {
+    async function askAISpellingWithAudio(sentenceContext, base64Audio) {
         const systemInstruction = 
-            "You are an expert Vocabulary.com spelling solver.\n" +
-            "You are given an example sentence or definition with a blank (________) from Vocabulary.com.\n" +
-            "Identify the exact academic vocabulary word that fits the blank and part of speech described (e.g., if it says 'The adjective ________ describes something that cannot be divided into parts', the answer is 'indivisible').\n" +
+            "You are an expert vocabulary spelling solver.\n" +
+            (base64Audio ? "Listen carefully to the attached audio clip of the spoken vocabulary word.\n" : "") +
+            "Read the sentence context and definition.\n" +
+            "Return the exact single vocabulary word (spelled correctly in lowercase).\n" +
             "Output your final answer on the last line strictly in this format:\n" +
             "ANSWER: <single word>";
 
-        const userPrompt = `Sentence / Definition:\n"${sentenceContext}"\n\nIdentify the exact vocabulary word for the blank:`;
+        const userPrompt = `Sentence / Context:\n"${sentenceContext}"\n\n${base64Audio ? "Transcribe the spoken word from the audio that completes this blank:" : "Identify the single vocabulary word that fits this blank:"}`;
 
-        let rawReply = null;
-
-        if (config.spellSearch) {
-            try {
-                // Try Exa Instant with a strict 10-second cap
-                rawReply = await callAI(systemInstruction, userPrompt, [], true, 10000);
-                logDebug('AI spelling reply (Exa Instant)', rawReply);
-            } catch (err) {
-                logDebug(`Exa search timed out or failed (${err.message}), falling back to pure memory...`);
-                setStatus('⚡ Search slow, using instant memory fallback...');
-            }
-        }
-
-        // Automatic fallback to pure model memory if search was disabled, timed out, or returned empty
-        if (!rawReply) {
-            rawReply = await callAI(systemInstruction, userPrompt, [], false, 12000);
-            logDebug('AI spelling reply (Memory)', rawReply);
-        }
+        const rawReply = await callAI(systemInstruction, userPrompt, [], base64Audio);
+        logDebug('AI spelling reply', rawReply);
 
         let parsed = extractFinalAnswer(rawReply);
         if (!parsed && rawReply) {
@@ -641,7 +666,7 @@
             "ANSWER: <1, 2, 3, or 4>";
 
         const userPrompt = `Target Word Prompt: "${wordPrompt}"\nWhich option (1, 2, 3, or 4) matches this word?`;
-        const rawReply = await callAI(systemInstruction, userPrompt, pictureUrls, false, 14000);
+        const rawReply = await callAI(systemInstruction, userPrompt, pictureUrls, null);
         logDebug('AI picture reply', rawReply);
 
         const parsed = extractFinalAnswer(rawReply);
@@ -650,7 +675,7 @@
     }
 
     // ==========================================
-    // 6. QUESTION SOLVING PIPELINE
+    // 7. QUESTION SOLVING PIPELINE
     // ==========================================
     function getPacingDelay() {
         if (config.speed === 'instant') {
@@ -797,6 +822,7 @@
         const submitBtn = questBox.querySelector('button.spellit, button[type="submit"]');
         const label = questBox.querySelector('.spelltheword .label, .label');
         const sentenceElem = questBox.querySelector('.sentence.blanked, .sentence, .questionContent');
+        const playBtn = questBox.querySelector('button.playword, .playword');
 
         if (!inp || !sentenceElem) return;
 
@@ -809,13 +835,30 @@
         let wordAnswer = config.cache[cacheKey];
 
         if (!wordAnswer) {
+            let base64Audio = null;
+
+            if (config.audioRip && playBtn) {
+                setStatus('🎧 Ripping pronunciation audio...');
+                interceptedAudioUrl = null;
+                playBtn.click(); // Triggers player to load MP3 stream
+
+                // Wait 450ms for the audio URL to be intercepted
+                await new Promise(r => setTimeout(r, 450));
+
+                if (interceptedAudioUrl) {
+                    logDebug('Ripping audio stream:', interceptedAudioUrl);
+                    base64Audio = await fetchAudioAsBase64(interceptedAudioUrl);
+                }
+            }
+
             const activeModelName = config.provider === 'gemini' ? config.model : config.orModel;
-            setStatus(`🤖 Spelling via ${activeModelName}${config.spellSearch ? ' (Exa Instant)' : ''}...`);
+            setStatus(`🤖 Listening & Solving via ${activeModelName}${base64Audio ? ' (Audio)' : ''}...`);
+
             try {
-                wordAnswer = await askAISpelling(sentenceText);
+                wordAnswer = await askAISpellingWithAudio(sentenceText, base64Audio);
                 if (wordAnswer) {
                     saveCache(cacheKey, wordAnswer);
-                    setStatus(`✅ Spell: ${wordAnswer}`);
+                    setStatus(`✅ Audio-Identified: ${wordAnswer}`);
                 }
             } catch (err) {
                 setStatus(`❌ ${err.message}`);
@@ -826,9 +869,7 @@
         }
 
         if (wordAnswer) {
-            inp.value = wordAnswer;
-            inp.dispatchEvent(new Event('input', { bubbles: true }));
-            inp.dispatchEvent(new Event('change', { bubbles: true }));
+            setReactiveInputValue(inp, wordAnswer);
 
             if (label) {
                 label.style.color = "springgreen";
@@ -845,7 +886,7 @@
     }
 
     // ==========================================
-    // 7. MAIN ENGINE & OBSERVER
+    // 8. MAIN ENGINE & OBSERVER
     // ==========================================
     async function checkAndSolve() {
         if (checkBlockersAndLockout()) return;
@@ -876,7 +917,7 @@
 
     function startEngine() {
         injectUI();
-        logDebug('Vocab Solver Engine 2.2.3 started on ' + location.pathname);
+        logDebug('Vocab Solver Engine 2.3.0 started on ' + location.pathname);
 
         const observer = new MutationObserver(() => {
             checkAndSolve();
