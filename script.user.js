@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      2.0.1
-// @description  Solves Vocabulary.com (Text, Spelling, Picture Choices, Vocab Jam) with unbreakable reply parsing, synonym extraction, and anti-lockout pacing.
+// @version      2.0.2
+// @description  Solves Vocabulary.com (Text, Spelling, Picture Choices, Vocab Jam) with high-accuracy spelling recall, synonym resolution, and anti-lockout pacing.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -29,8 +29,8 @@
     };
 
     const GEMINI_MODELS = [
+        { id: 'gemini-flash-latest', label: 'gemini-flash-latest (Recommended: High Accuracy)' },
         { id: 'gemini-flash-lite-latest', label: 'gemini-flash-lite-latest (Fastest Alias)' },
-        { id: 'gemini-flash-latest', label: 'gemini-flash-latest (Balanced Alias)' },
         { id: 'gemini-pro-latest', label: 'gemini-pro-latest (Pro Alias)' },
         { id: 'gemini-3.1-flash-lite', label: 'gemini-3.1-flash-lite (Pinned 3.1 Lite)' },
         { id: 'gemini-3.5-flash-lite', label: 'gemini-3.5-flash-lite (Pinned 3.5 Lite)' },
@@ -39,9 +39,9 @@
     ];
 
     let config = {
-        provider: localStorage.getItem(STORAGE_KEYS.PROVIDER) || 'openrouter',
+        provider: localStorage.getItem(STORAGE_KEYS.PROVIDER) || 'gemini',
         apiKey: localStorage.getItem(STORAGE_KEYS.API_KEY) || '',
-        model: localStorage.getItem(STORAGE_KEYS.MODEL) || 'gemini-flash-lite-latest',
+        model: localStorage.getItem(STORAGE_KEYS.MODEL) || 'gemini-flash-latest',
         orModel: localStorage.getItem(STORAGE_KEYS.OR_MODEL) || 'deepseek/deepseek-chat',
         mode: localStorage.getItem(STORAGE_KEYS.MODE) || 'auto',
         speed: localStorage.getItem(STORAGE_KEYS.SPEED) || 'safe',
@@ -161,7 +161,7 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v2.0.1</span>
+                    <span>AI Vocab Solver v2.0.2</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
@@ -382,7 +382,6 @@
         return null;
     }
 
-    // Extracts true word/phrase without DOM tool/button contamination
     function getCleanChoiceText(el) {
         if (!el) return '';
         const lookupSpan = el.querySelector('.lookup[word]');
@@ -411,7 +410,6 @@
         if (!reply || typeof reply !== 'string') return '';
         let stripped = reply.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
         if (!stripped) {
-            // Model outputted inside thinking tokens: unwrap rather than discarding
             stripped = reply.replace(/<\/?think>/gi, '').trim();
         }
         return stripped;
@@ -437,7 +435,7 @@
                 body = JSON.stringify({
                     systemInstruction: { parts: [{ text: systemPrompt }] },
                     contents: [{ parts: contentParts }],
-                    generationConfig: { temperature: 0.1, maxOutputTokens: 250 }
+                    generationConfig: { temperature: 0.1, maxOutputTokens: 350 }
                 });
             } else {
                 endpoint = 'https://openrouter.ai/api/v1/chat/completions';
@@ -455,7 +453,7 @@
                         userContent.push({ type: 'image_url', image_url: { url } });
                     });
                 } else {
-                    userContent = userPrompt; // Text models require pure string format
+                    userContent = userPrompt;
                 }
 
                 body = JSON.stringify({
@@ -465,7 +463,7 @@
                         { role: 'user', content: userContent }
                     ],
                     temperature: 0.1,
-                    max_tokens: 350
+                    max_tokens: 400
                 });
             }
 
@@ -521,10 +519,8 @@
         const parsed = extractFinalAnswer(rawReply);
         logDebug('Parsed final answer', parsed);
 
-        // 1. Exact match
         let matched = choicesTextArray.find(c => c.toLowerCase().trim() === parsed.toLowerCase().trim());
 
-        // 2. Numbered index match (1, 2, 3, 4)
         if (!matched) {
             const numMatch = parsed.match(/^([1-4])\b/);
             if (numMatch) {
@@ -535,7 +531,6 @@
             }
         }
 
-        // 3. Substring match
         if (!matched && parsed.length >= 3) {
             matched = choicesTextArray.find(c => 
                 c.toLowerCase().includes(parsed.toLowerCase()) || 
@@ -543,7 +538,6 @@
             );
         }
 
-        // 4. Raw reply content scan (resilience for verbose reasoning outputs)
         if (!matched) {
             const replyLower = rawReply.toLowerCase();
             for (const choice of choicesTextArray) {
@@ -560,11 +554,17 @@
     async function askAISpelling(sentenceContext) {
         const systemInstruction = 
             "You are an expert Vocabulary.com spelling solver.\n" +
-            "Given a sentence with missing blanks (________), determine the single vocabulary word that fits the context.\n" +
-            "Output ONLY the word in this exact format:\n" +
-            "ANSWER: <word>";
+            "You are given a dictionary definition or sentence with blanks (________) taken directly from Vocabulary.com.\n" +
+            "Your task is to identify the exact academic headword being tested.\n" +
+            "Rules:\n" +
+            "1. Vocabulary.com tests formal academic, SAT, GRE, and literary vocabulary words. Never guess basic colloquial words (e.g. avoid 'extra', 'help', 'read').\n" +
+            "2. Identify the core definition and grammatical context of the blank(s).\n" +
+            "3. If different blanks take different forms, the target spelling is always the primary dictionary headword / base lemma (e.g., 'supplement' rather than 'supplementary').\n" +
+            "4. Reason briefly in 1-2 lines, then output your final answer on the last line strictly in this format:\n" +
+            "ANSWER: <single word>";
 
-        const rawReply = await callAI(systemInstruction, `Sentence:\n${sentenceContext}`);
+        const userPrompt = `Sentence / Definition:\n"${sentenceContext}"\n\nIdentify the target vocabulary headword:`;
+        const rawReply = await callAI(systemInstruction, userPrompt);
         logDebug('AI spelling reply', rawReply);
 
         let parsed = extractFinalAnswer(rawReply);
@@ -599,11 +599,11 @@
     // ==========================================
     function getPacingDelay() {
         if (config.speed === 'instant') {
-            return Math.floor(Math.random() * 200) + 700; // 700-900ms
+            return Math.floor(Math.random() * 200) + 700;
         } else if (config.speed === 'fast') {
-            return Math.floor(Math.random() * 1000) + 1500; // 1.5s - 2.5s
+            return Math.floor(Math.random() * 1000) + 1500;
         } else {
-            return Math.floor(Math.random() * 1500) + 3200; // 3.2s - 4.7s (prevents 5-min lockout)
+            return Math.floor(Math.random() * 1500) + 3200; // Safe pacing (prevents 5-minute lockout)
         }
     }
 
@@ -741,7 +741,7 @@
         const inp = questBox.querySelector('input.wordspelling, input[type="text"]');
         const submitBtn = questBox.querySelector('button.spellit, button[type="submit"]');
         const label = questBox.querySelector('.spelltheword .label, .label');
-        const sentenceElem = questBox.querySelector('.sentence.blanked, .sentence');
+        const sentenceElem = questBox.querySelector('.sentence.blanked, .sentence, .questionContent');
 
         if (!inp || !sentenceElem) return;
 
@@ -821,7 +821,7 @@
 
     function startEngine() {
         injectUI();
-        logDebug('Vocab Solver Engine 2.0.1 started on ' + location.pathname);
+        logDebug('Vocab Solver Engine 2.0.2 started on ' + location.pathname);
 
         const observer = new MutationObserver(() => {
             checkAndSolve();
