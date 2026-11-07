@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vocabulary.com Gemini & OpenRouter AI Solver
 // @namespace    http://tampermonkey.net/
-// @version      2.3.0
-// @description  Solves Vocabulary.com with native audio ripping for spelling questions (audio-to-text), multimodal image support, and anti-lockout pacing.
+// @version      2.3.1
+// @description  Solves Vocabulary.com with safe audio stream ripping (audio-to-text pronunciation), reactive input injection, and anti-lockout pacing.
 // @author       apple-bonkers
 // @match        *://*.vocabulary.com/*
 // @icon         https://www.vocabulary.com/favicon.ico
@@ -16,39 +16,57 @@
     'use strict';
 
     // ==========================================
-    // 1. AUDIO STREAM INTERCEPTOR
+    // 1. SAFE AUDIO STREAM INTERCEPTOR
     // ==========================================
     let interceptedAudioUrl = null;
 
-    const OriginalAudio = window.Audio;
-    window.Audio = class extends OriginalAudio {
-        constructor(src) {
-            super(src);
-            if (src && typeof src === 'string') {
-                interceptedAudioUrl = src;
-                console.log('[VCOM-AI] Audio intercepted via new Audio():', src);
-            }
-        }
-    };
+    try {
+        const origPlay = HTMLMediaElement.prototype.play;
+        HTMLMediaElement.prototype.play = function(...args) {
+            try {
+                const src = this.src || this.currentSrc;
+                if (src && typeof src === 'string' && (src.includes('.mp3') || src.includes('audio'))) {
+                    interceptedAudioUrl = src;
+                }
+            } catch(e) {}
+            return origPlay.apply(this, args);
+        };
+    } catch(e) {}
 
-    const origPlay = HTMLMediaElement.prototype.play;
-    HTMLMediaElement.prototype.play = function() {
-        if (this.src && typeof this.src === 'string') {
-            interceptedAudioUrl = this.src;
-            console.log('[VCOM-AI] Audio intercepted via play():', this.src);
+    try {
+        const srcDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
+        if (srcDesc && srcDesc.set) {
+            const origSet = srcDesc.set;
+            Object.defineProperty(HTMLMediaElement.prototype, 'src', {
+                set: function(val) {
+                    try {
+                        if (val && typeof val === 'string' && (val.includes('.mp3') || val.includes('audio'))) {
+                            interceptedAudioUrl = val;
+                        }
+                    } catch(e) {}
+                    return origSet.call(this, val);
+                },
+                get: srcDesc.get,
+                configurable: true
+            });
         }
-        return origPlay.apply(this, arguments);
-    };
+    } catch(e) {}
 
-    const origFetch = window.fetch;
-    window.fetch = async function(...args) {
-        const url = typeof args[0] === 'string' ? args[0] : args[0]?.url;
-        if (url && (url.includes('.mp3') || url.includes('/audio/') || url.includes('audio.vocabulary.com'))) {
-            interceptedAudioUrl = url;
-            console.log('[VCOM-AI] Audio intercepted via fetch():', url);
+    try {
+        const OrigAudio = window.Audio;
+        if (OrigAudio) {
+            window.Audio = function(...args) {
+                const aud = new OrigAudio(...args);
+                try {
+                    if (args[0] && typeof args[0] === 'string') {
+                        interceptedAudioUrl = args[0];
+                    }
+                } catch(e) {}
+                return aud;
+            };
+            window.Audio.prototype = OrigAudio.prototype;
         }
-        return origFetch.apply(this, args);
-    };
+    } catch(e) {}
 
     // ==========================================
     // 2. STATE & STORAGE MANAGEMENT
@@ -194,13 +212,13 @@
 
             panel.innerHTML = `
                 <div class="vcom-ai-header">
-                    <span>AI Vocab Solver v2.3.0</span>
+                    <span>AI Vocab Solver v2.3.1</span>
                     <span style="font-size: 11px; color: #64748b;">Alt+G</span>
                 </div>
                 <div class="vcom-ai-field">
                     <label for="vcom-provider">Provider</label>
                     <select id="vcom-provider" class="vcom-ai-select">
-                        <option value="gemini" ${isGemini ? 'selected' : ''}>Google Gemini API (Best Audio Support)</option>
+                        <option value="gemini" ${isGemini ? 'selected' : ''}>Google Gemini API (Native Audio Support)</option>
                         <option value="openrouter" ${!isGemini ? 'selected' : ''}>OpenRouter</option>
                     </select>
                 </div>
@@ -218,9 +236,9 @@
                     </div>
                 </div>
                 <div class="vcom-ai-field">
-                    <label for="vcom-audio-rip">Audio Ripper (Auto-Transcribe Pronunciation)</label>
+                    <label for="vcom-audio-rip">Audio Ripper (Pronunciation Transcriber)</label>
                     <select id="vcom-audio-rip" class="vcom-ai-select">
-                        <option value="true" ${config.audioRip ? 'selected' : ''}>Enabled (Rips & Feeds Spoken Word to AI)</option>
+                        <option value="true" ${config.audioRip ? 'selected' : ''}>Enabled (Rips & Feeds Audio to Gemini)</option>
                         <option value="false" ${!config.audioRip ? 'selected' : ''}>Disabled (Context Definition Only)</option>
                     </select>
                 </div>
@@ -451,38 +469,86 @@
     }
 
     function setReactiveInputValue(input, value) {
-        input.focus();
-        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-        if (nativeSetter) {
-            nativeSetter.call(input, value);
-        } else {
+        if (!input || !value) return;
+        try {
+            input.focus();
+            const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+            if (nativeSetter) {
+                nativeSetter.call(input, value);
+            } else {
+                input.value = value;
+            }
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        } catch(e) {
             input.value = value;
         }
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function submitSpellingForm(input, submitBtn, form) {
+        if (!input) return;
+        try {
+            input.focus();
+            input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+            input.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+            input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+        } catch(e) {}
+
+        if (submitBtn) {
+            try { submitBtn.click(); } catch(e) {}
+        }
+
+        if (form && typeof form.requestSubmit === 'function') {
+            try { form.requestSubmit(submitBtn || undefined); } catch(e) {}
+        }
     }
 
     // ==========================================
-    // 5. AUDIO CONVERTER
+    // 5. AUDIO RIPPER & CONVERTER
     // ==========================================
-    async function fetchAudioAsBase64(url) {
+    function getAudioUrlFromDOM(playBtn, questBox) {
+        if (playBtn) {
+            const dataAudio = playBtn.getAttribute('data-audio') || playBtn.dataset?.audio;
+            if (dataAudio) {
+                return dataAudio.startsWith('http') ? dataAudio : `https://audio.vocabulary.com/1.0/us/${dataAudio}.mp3`;
+            }
+            const dataSrc = playBtn.getAttribute('data-src') || playBtn.getAttribute('data-sound') || playBtn.dataset?.sound;
+            if (dataSrc) return dataSrc;
+        }
+        const audioEl = questBox.querySelector('audio, source');
+        if (audioEl && (audioEl.src || audioEl.currentSrc)) {
+            return audioEl.src || audioEl.currentSrc;
+        }
+        return null;
+    }
+
+    async function fetchAudioBase64(url) {
+        if (!url) return null;
         try {
             const resp = await fetch(url);
+            if (!resp.ok) return null;
             const blob = await resp.blob();
-            return new Promise((resolve, reject) => {
+            return new Promise((resolve) => {
                 const reader = new FileReader();
-                reader.onloadend = () => resolve(reader.result.split(',')[1]);
-                reader.onerror = reject;
+                reader.onloadend = () => {
+                    const res = reader.result;
+                    if (typeof res === 'string' && res.includes(',')) {
+                        resolve(res.split(',')[1]);
+                    } else {
+                        resolve(null);
+                    }
+                };
+                reader.onerror = () => resolve(null);
                 reader.readAsDataURL(blob);
             });
         } catch (e) {
-            logDebug('Failed to fetch/convert audio', e.message);
+            logDebug('Audio fetch error', e.message);
             return null;
         }
     }
 
     // ==========================================
-    // 6. MULTIMODAL API ENGINE (TEXT, IMAGES & AUDIO)
+    // 6. MULTIMODAL API ENGINE (TEXT, VISION, AUDIO)
     // ==========================================
     function cleanAIReply(reply) {
         if (!reply || typeof reply !== 'string') return '';
@@ -631,22 +697,47 @@
             );
         }
 
+        if (!matched) {
+            const replyLower = rawReply.toLowerCase();
+            for (const choice of choicesTextArray) {
+                if (choice.length >= 3 && replyLower.includes(choice.toLowerCase())) {
+                    matched = choice;
+                    break;
+                }
+            }
+        }
+
         return matched || null;
     }
 
-    async function askAISpellingWithAudio(sentenceContext, base64Audio) {
+    async function askAISpelling(sentenceContext, base64Audio = null) {
         const systemInstruction = 
-            "You are an expert vocabulary spelling solver.\n" +
-            (base64Audio ? "Listen carefully to the attached audio clip of the spoken vocabulary word.\n" : "") +
-            "Read the sentence context and definition.\n" +
-            "Return the exact single vocabulary word (spelled correctly in lowercase).\n" +
+            "You are an expert Vocabulary.com spelling solver.\n" +
+            (base64Audio ? "Listen carefully to the attached audio clip of the target word being spoken.\n" : "") +
+            "Analyze the sentence context and definition.\n" +
+            "Identify the exact academic vocabulary word that fits the blank and part of speech described.\n" +
             "Output your final answer on the last line strictly in this format:\n" +
-            "ANSWER: <single word>";
+            "ANSWER: <single word in lowercase>";
 
-        const userPrompt = `Sentence / Context:\n"${sentenceContext}"\n\n${base64Audio ? "Transcribe the spoken word from the audio that completes this blank:" : "Identify the single vocabulary word that fits this blank:"}`;
+        const userPrompt = `Context Sentence:\n"${sentenceContext}"\n\n` +
+            (base64Audio ? "Transcribe the word spoken in the audio that completes the blank in this sentence:" : "What single vocabulary word fills this blank?");
 
-        const rawReply = await callAI(systemInstruction, userPrompt, [], base64Audio);
-        logDebug('AI spelling reply', rawReply);
+        let rawReply = null;
+
+        if (base64Audio) {
+            try {
+                rawReply = await callAI(systemInstruction, userPrompt, [], base64Audio);
+                logDebug('AI spelling reply (Audio-assisted)', rawReply);
+            } catch(err) {
+                logDebug('Audio call failed, falling back to text...', err.message);
+                rawReply = null;
+            }
+        }
+
+        if (!rawReply) {
+            rawReply = await callAI(systemInstruction, userPrompt, [], null);
+            logDebug('AI spelling reply (Text only)', rawReply);
+        }
 
         let parsed = extractFinalAnswer(rawReply);
         if (!parsed && rawReply) {
@@ -823,49 +914,68 @@
         const label = questBox.querySelector('.spelltheword .label, .label');
         const sentenceElem = questBox.querySelector('.sentence.blanked, .sentence, .questionContent');
         const playBtn = questBox.querySelector('button.playword, .playword');
+        const form = questBox.querySelector('form.form-spelling, form');
 
         if (!inp || !sentenceElem) return;
 
         const sentenceText = sentenceElem.innerText.trim();
         const cacheKey = `spell|||${sentenceText.toLowerCase().replace(/\s+/g, ' ')}`;
 
+        let wordAnswer = config.cache[cacheKey];
+
+        // If already cached, ensure input remains populated even if the page clears it
+        if (wordAnswer) {
+            if (inp.value !== wordAnswer) {
+                setReactiveInputValue(inp, wordAnswer);
+            }
+            if (label && !label.innerText.includes("🧠")) {
+                label.style.color = "springgreen";
+                label.innerText = `Spell the word: ${wordAnswer} 🧠`;
+            }
+            if (config.mode === 'auto' && !submitBtn?.dataset.autoSubmitting) {
+                if (submitBtn) submitBtn.dataset.autoSubmitting = "true";
+                setTimeout(() => {
+                    setReactiveInputValue(inp, wordAnswer);
+                    submitSpellingForm(inp, submitBtn, form);
+                    setTimeout(() => { if (submitBtn) delete submitBtn.dataset.autoSubmitting; }, 1500);
+                }, getPacingDelay());
+            }
+            return;
+        }
+
         if (cacheKey === lastSolvedSignature) return;
         lastSolvedSignature = cacheKey;
 
-        let wordAnswer = config.cache[cacheKey];
+        let base64Audio = null;
 
-        if (!wordAnswer) {
-            let base64Audio = null;
+        if (config.audioRip && playBtn) {
+            setStatus('🎧 Ripping pronunciation audio...');
+            interceptedAudioUrl = getAudioUrlFromDOM(playBtn, questBox);
 
-            if (config.audioRip && playBtn) {
-                setStatus('🎧 Ripping pronunciation audio...');
-                interceptedAudioUrl = null;
-                playBtn.click(); // Triggers player to load MP3 stream
-
-                // Wait 450ms for the audio URL to be intercepted
+            if (!interceptedAudioUrl) {
+                try { playBtn.click(); } catch(e) {}
                 await new Promise(r => setTimeout(r, 450));
-
-                if (interceptedAudioUrl) {
-                    logDebug('Ripping audio stream:', interceptedAudioUrl);
-                    base64Audio = await fetchAudioAsBase64(interceptedAudioUrl);
-                }
+                interceptedAudioUrl = interceptedAudioUrl || getAudioUrlFromDOM(playBtn, questBox);
             }
 
-            const activeModelName = config.provider === 'gemini' ? config.model : config.orModel;
-            setStatus(`🤖 Listening & Solving via ${activeModelName}${base64Audio ? ' (Audio)' : ''}...`);
-
-            try {
-                wordAnswer = await askAISpellingWithAudio(sentenceText, base64Audio);
-                if (wordAnswer) {
-                    saveCache(cacheKey, wordAnswer);
-                    setStatus(`✅ Audio-Identified: ${wordAnswer}`);
-                }
-            } catch (err) {
-                setStatus(`❌ ${err.message}`);
-                return;
+            if (interceptedAudioUrl) {
+                logDebug('Ripping audio stream:', interceptedAudioUrl);
+                base64Audio = await fetchAudioBase64(interceptedAudioUrl);
             }
-        } else {
-            setStatus('⚡ Spelling loaded from cache');
+        }
+
+        const activeModelName = config.provider === 'gemini' ? config.model : config.orModel;
+        setStatus(`🤖 Solving spell via ${activeModelName}${base64Audio ? ' (Audio)' : ''}...`);
+
+        try {
+            wordAnswer = await askAISpelling(sentenceText, base64Audio);
+            if (wordAnswer) {
+                saveCache(cacheKey, wordAnswer);
+                setStatus(`✅ Spell: ${wordAnswer}`);
+            }
+        } catch (err) {
+            setStatus(`❌ ${err.message}`);
+            return;
         }
 
         if (wordAnswer) {
@@ -876,10 +986,12 @@
                 label.innerText = `Spell the word: ${wordAnswer} 🧠`;
             }
 
-            if (config.mode === 'auto') {
+            if (config.mode === 'auto' && !submitBtn?.dataset.autoSubmitting) {
+                if (submitBtn) submitBtn.dataset.autoSubmitting = "true";
                 setTimeout(() => {
-                    inp.blur();
-                    if (submitBtn) submitBtn.click();
+                    setReactiveInputValue(inp, wordAnswer);
+                    submitSpellingForm(inp, submitBtn, form);
+                    setTimeout(() => { if (submitBtn) delete submitBtn.dataset.autoSubmitting; }, 1500);
                 }, getPacingDelay());
             }
         }
@@ -917,7 +1029,7 @@
 
     function startEngine() {
         injectUI();
-        logDebug('Vocab Solver Engine 2.3.0 started on ' + location.pathname);
+        logDebug('Vocab Solver Engine 2.3.1 started on ' + location.pathname);
 
         const observer = new MutationObserver(() => {
             checkAndSolve();
